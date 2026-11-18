@@ -1,11 +1,503 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#090d16">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>GAN Smart Timer</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --sub: #64748b;
+      --border: #e2e8f0;
+      --accent: #2563eb;
+      --danger: #ef4444;
+      --warn: #d97706;
+      --ready: #16a34a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #090d16;
+        --card: #131b2e;
+        --text: #f1f5f9;
+        --sub: #94a3b8;
+        --border: #1e293b;
+        --accent: #3b82f6;
+        --danger: #f87171;
+        --warn: #f59e0b;
+        --ready: #22c55e;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      overflow-x: hidden;
+      padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 80px) 16px;
+    }
+    .app { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 14px; }
+    header { display: flex; justify-content: space-between; align-items: center; padding-top: 8px; }
+    .status-badge { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); }
+    .btn-group { display: flex; gap: 8px; }
+    button {
+      font-family: inherit;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-weight: 500;
+      cursor: pointer;
+      font-size: 0.9rem;
+      touch-action: manipulation;
+    }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.ready { background: var(--ready); color: #fff; border-color: var(--ready); }
+    button.danger { color: var(--danger); }
+    .banner {
+      background: var(--card);
+      border: 1px solid var(--warn);
+      color: var(--warn);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      display: none;
+    }
+    .scramble-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      text-align: center;
+      font-family: ui-monospace, monospace;
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      line-height: 1.4;
+    }
+    .player-wrap {
+      width: 100%;
+      height: 200px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+    }
+    twisty-player { width: 100%; height: 100%; }
+    .timer-wrap { text-align: center; padding: 8px 0; }
+    .timer {
+      font-family: ui-monospace, monospace;
+      font-size: 4.8rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+      color: var(--text);
+    }
+    .timer.armed { color: var(--ready); }
+    .timer.running { color: var(--accent); }
+    .timer-sub { font-size: 0.9rem; color: var(--sub); margin-top: 6px; min-height: 1.2em; }
+    .stats-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); text-align: center; }
+    .stat-val { font-size: 1.15rem; font-weight: 700; font-family: ui-monospace, monospace; }
+    .stat-lbl { font-size: 0.72rem; color: var(--sub); text-transform: uppercase; }
+    .chart-box { width: 100%; height: 50px; }
+    .history-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .history-head { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; font-weight: 600; }
+    .history-list { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
+    .history-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.85rem;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--bg);
+    }
+    .history-meta { font-family: ui-monospace, monospace; font-size: 0.78rem; color: var(--sub); }
+    .action-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: var(--card);
+      border-top: 1px solid var(--border);
+      padding: 10px 16px calc(env(safe-area-inset-bottom) + 10px) 16px;
+      display: flex;
+      justify-content: center;
+      z-index: 10;
+    }
+    .action-inner { width: 100%; max-width: 460px; display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; }
+    .action-bar button { padding: 12px 6px; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div id="status-badge" class="status-badge">Rozłączono</div>
+      <div class="btn-group">
+        <button id="btn-viz" onclick="toggleViz()">3D</button>
+        <button onclick="resetModel()">Reset modelu</button>
+      </div>
+    </header>
+
+    <div id="bt-unsupported" class="banner" style="border-color:var(--danger);color:var(--danger);">
+      Brak Web Bluetooth. Użyj Chrome/Edge na Androidzie lub Bluefy na iPhone.
+    </div>
+    <div id="scramble-warn" class="banner">Uwaga: stan kostki różni się od scramble'a.</div>
+
+    <div id="scramble-text" class="scramble-box">Generowanie...</div>
+
+    <div class="player-wrap">
+      <twisty-player id="player" visualization="3D" control-panel="none" background="none"></twisty-player>
+    </div>
+
+    <div class="timer-wrap">
+      <div id="timer-val" class="timer">0.00</div>
+      <div id="timer-sub" class="timer-sub">Kliknij „Gotowy”</div>
+    </div>
+
+    <div class="stats-card">
+      <div class="stats-grid">
+        <div><div id="st-best" class="stat-val">-</div><div class="stat-lbl">Najlepszy</div></div>
+        <div><div id="st-ao5" class="stat-val">-</div><div class="stat-lbl">ao5</div></div>
+        <div><div id="st-ao12" class="stat-val">-</div><div class="stat-lbl">ao12</div></div>
+        <div><div id="st-mean" class="stat-val">-</div><div class="stat-lbl">Średnia</div></div>
+      </div>
+      <div class="chart-box">
+        <svg id="chart-svg" width="100%" height="100%" viewBox="0 0 300 50" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
+
+    <div class="history-card">
+      <div class="history-head">
+        <span>Historia ułożeń (<span id="solves-count">0</span>)</span>
+        <div class="btn-group">
+          <button onclick="copyLastAlg()">Kopiuj alg</button>
+          <button onclick="exportCSV()">CSV</button>
+        </div>
+      </div>
+      <ul id="history-list" class="history-list"></ul>
+    </div>
+  </div>
+
+  <div class="action-bar">
+    <div class="action-inner">
+      <button id="btn-ready" class="primary" onclick="toggleReady()">Gotowy</button>
+      <button id="btn-conn" onclick="toggleConnect()">Połącz</button>
+      <button onclick="nextScramble()">Nowy</button>
+    </div>
+  </div>
+
+  <script type="module">
+    window.onerror = (msg, src, line, col, err) => {
+      const b = document.getElementById('status-badge');
+      if (b) b.textContent = err ? (err.name + ": " + err.message) : String(msg);
+    };
+    window.addEventListener('unhandledrejection', (e) => {
+      const err = e.reason;
+      const b = document.getElementById('status-badge');
+      if (b) b.textContent = (err && err.name && err.message) ? (err.name + ": " + err.message) : String(err);
+    });
+
+    import { TwistyPlayer } from "https://esm.sh/cubing@0.52.2/twisty";
+    import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
+    import { Alg } from "https://esm.sh/cubing@0.52.2/alg";
+    import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
+
+    const state = {
+      conn: null,
+      sub: null,
+      kpuzzle: null,
+      timerState: 'IDLE', // IDLE, ARMED, RUNNING
+      startTime: 0,
+      rafId: null,
+      scramble: '',
+      expectedPattern: null,
+      lastPattern: null,
+      moves: [],
+      solves: [],
+      viz: '3D'
+    };
+
+    function loadSolves() {
+      try { return JSON.parse(localStorage.getItem('gan_solves') || '[]'); } catch { return []; }
+    }
+    function saveSolves() {
+      try { localStorage.setItem('gan_solves', JSON.stringify(state.solves)); } catch {}
+    }
+
+    function genScramble(len = 20) {
+      const axes = [['U','D'], ['R','L'], ['F','B']];
+      const suf = ['', "'", '2'];
+      const res = [];
+      let prev = -1;
+      for (let i = 0; i < len; i++) {
+        let a;
+        do { a = Math.floor(Math.random() * 3); } while (a === prev);
+        prev = a;
+        res.push(axes[a][Math.floor(Math.random() * 2)] + suf[Math.floor(Math.random() * 3)]);
+      }
+      return res.join(' ');
+    }
+
+    async function setScramble(str) {
+      state.scramble = str;
+      document.getElementById('scramble-text').textContent = str;
+      document.getElementById('scramble-warn').style.display = 'none';
+      try {
+        if (!state.kpuzzle) state.kpuzzle = await puzzles['3x3x3'].kpuzzle();
+        state.expectedPattern = state.kpuzzle.defaultPattern().applyAlg(new Alg(str));
+      } catch { state.expectedPattern = null; }
+    }
+
+    function updateTimerDisplay() {
+      if (state.timerState !== 'RUNNING') return;
+      const ms = performance.now() - state.startTime;
+      document.getElementById('timer-val').textContent = (ms / 1000).toFixed(2);
+      state.rafId = requestAnimationFrame(updateTimerDisplay);
+    }
+
+    function handleMove(move) {
+      const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
+      if (!str) return;
+      const isRot = /^[xyz]/i.test(str);
+      const player = document.getElementById('player');
+      if (player?.experimentalAddMove) {
+        try { player.experimentalAddMove(str); } catch {}
+      }
+      if (isRot) return;
+
+      const now = performance.now();
+      if (state.timerState === 'ARMED') {
+        state.timerState = 'RUNNING';
+        state.startTime = now;
+        state.moves = [{ m: str, t: 0 }];
+        document.getElementById('timer-val').className = 'timer running';
+        document.getElementById('btn-ready').textContent = 'Układanie...';
+        document.getElementById('btn-ready').className = 'primary';
+        state.rafId = requestAnimationFrame(updateTimerDisplay);
+      } else if (state.timerState === 'RUNNING') {
+        state.moves.push({ m: str, t: Math.round(now - state.startTime) });
+        const count = state.moves.length;
+        const curTps = (count / ((now - state.startTime) / 1000)).toFixed(2);
+        document.getElementById('timer-sub').textContent = `${count} ruchów | ${curTps} TPS`;
+      }
+    }
+
+    function finishSolve(endTime) {
+      cancelAnimationFrame(state.rafId);
+      state.timerState = 'IDLE';
+      const totalMs = Math.round(endTime - state.startTime);
+      const sec = (totalMs / 1000).toFixed(2);
+      const count = state.moves.length;
+      const tps = (count / (totalMs / 1000)).toFixed(2);
+
+      document.getElementById('timer-val').className = 'timer';
+      document.getElementById('timer-val').textContent = sec;
+      document.getElementById('timer-sub').textContent = `Ukończono! ${count} ruchów | ${tps} TPS`;
+      document.getElementById('btn-ready').textContent = 'Gotowy';
+      document.getElementById('btn-ready').className = 'primary';
+
+      state.solves.unshift({
+        id: Date.now(),
+        time: parseFloat(sec),
+        ms: totalMs,
+        count,
+        tps: parseFloat(tps),
+        scramble: state.scramble,
+        moves: state.moves
+      });
+      saveSolves();
+      renderStats();
+      renderHistory();
+      setScramble(genScramble());
+    }
+
+    window.toggleReady = () => {
+      const btn = document.getElementById('btn-ready');
+      const val = document.getElementById('timer-val');
+      const sub = document.getElementById('timer-sub');
+      const warn = document.getElementById('scramble-warn');
+
+      if (state.timerState === 'ARMED') {
+        state.timerState = 'IDLE';
+        btn.textContent = 'Gotowy';
+        btn.className = 'primary';
+        val.className = 'timer';
+        sub.textContent = 'Kliknij „Gotowy”';
+        warn.style.display = 'none';
+        return;
+      }
+      if (state.timerState === 'RUNNING') return;
+
+      state.timerState = 'ARMED';
+      state.moves = [];
+      btn.textContent = 'Uzbrojony (ruch startuje)';
+      btn.className = 'ready';
+      val.className = 'timer armed';
+      val.textContent = '0.00';
+      sub.textContent = 'Wykonaj pierwszy ruch';
+
+      if (state.lastPattern && state.expectedPattern) {
+        let match = false;
+        try {
+          match = state.lastPattern.experimentalIsIdentical?.(state.expectedPattern) ||
+            JSON.stringify(state.lastPattern.patternData) === JSON.stringify(state.expectedPattern.patternData);
+        } catch {}
+        warn.style.display = match ? 'none' : 'block';
+      }
+    };
+
+    window.toggleConnect = async () => {
+      const badge = document.getElementById('status-badge');
+      const btn = document.getElementById('btn-conn');
+      if (state.conn) {
+        try {
+          if (state.sub) {
+            state.sub.unsubscribe();
+            state.sub = null;
+          }
+          state.conn.disconnect();
+        } catch {}
+        state.conn = null;
+        badge.textContent = 'Rozłączono';
+        btn.textContent = 'Połącz';
+        return;
+      }
+      if (!navigator.bluetooth) {
+        document.getElementById('bt-unsupported').style.display = 'block';
+        return;
+      }
+      try {
+        badge.textContent = 'Łączenie...';
+        const conn = await connectGanCube(async (device, isFallback) => "0C:3D:5E:99:35:D6");
+        state.conn = conn;
+        badge.textContent = 'Połączono: ' + (conn.device?.name || 'GAN');
+        btn.textContent = 'Rozłącz';
+
+        state.sub = conn.events$.subscribe(ev => {
+          if (ev.type === "MOVE") {
+            handleMove(ev.move);
+          } else if (ev.type === "FACELETS") {
+            if (state.timerState === 'RUNNING' && state.moves.length >= 3 && ev.facelets === "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB") {
+              finishSolve(performance.now());
+            }
+          } else if (ev.type === "DISCONNECT") {
+            if (state.sub) {
+              state.sub.unsubscribe();
+              state.sub = null;
+            }
+            state.conn = null;
+            badge.textContent = 'Rozłączono';
+            btn.textContent = 'Połącz';
+          }
+        });
+
+        await conn.sendCubeCommand({ type: "REQUEST_FACELETS" });
+      } catch (err) {
+        badge.textContent = err.name + ": " + err.message;
+        btn.textContent = 'Połącz';
+      }
+    };
+
+    window.toggleViz = () => {
+      state.viz = state.viz === '3D' ? '2D' : '3D';
+      document.getElementById('player').visualization = state.viz;
+      document.getElementById('btn-viz').textContent = state.viz;
+    };
+
+    window.resetModel = () => {
+      const player = document.getElementById('player');
+      if (player) {
+        try { player.alg = new Alg(); } catch { player.alg = ''; }
+      }
+    };
+
+    window.nextScramble = () => setScramble(genScramble());
+
+    function calcAo(arr, n) {
+      if (arr.length < n) return '-';
+      const s = arr.slice(0, n).map(x => x.time).sort((a,b) => a - b).slice(1, n - 1);
+      return (s.reduce((a,b) => a + b, 0) / s.length).toFixed(2);
+    }
+
+    function renderStats() {
+      const list = state.solves;
+      document.getElementById('solves-count').textContent = list.length;
+      if (!list.length) {
+        ['st-best','st-ao5','st-ao12','st-mean'].forEach(id => document.getElementById(id).textContent = '-');
+        document.getElementById('chart-svg').innerHTML = '';
+        return;
+      }
+      const times = list.map(x => x.time);
+      document.getElementById('st-best').textContent = Math.min(...times).toFixed(2);
+      document.getElementById('st-mean').textContent = (times.reduce((a,b) => a + b, 0) / times.length).toFixed(2);
+      document.getElementById('st-ao5').textContent = calcAo(list, 5);
+      document.getElementById('st-ao12').textContent = calcAo(list, 12);
+
+      const rev = list.slice(0, 25).reverse();
+      if (rev.length < 2) return;
+      const tRev = rev.map(x => x.time);
+      const min = Math.min(...tRev), max = Math.max(...tRev), rng = (max - min) || 1;
+      const pts = rev.map((x, i) => {
+        const px = 10 + (i / (rev.length - 1)) * 280;
+        const py = 42 - ((x.time - min) / rng) * 34;
+        return `${px.toFixed(1)},${py.toFixed(1)}`;
+      }).join(' ');
+      document.getElementById('chart-svg').innerHTML = `<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${pts}" />`;
+    }
+
+    function renderHistory() {
+      const ul = document.getElementById('history-list');
+      ul.innerHTML = state.solves.map(s => `
+        <li class="history-item">
+          <div>
+            <strong>${s.time.toFixed(2)}s</strong>
+            <span class="history-meta">(${s.count} ruchów, ${s.tps} TPS)</span>
+          </div>
+          <div class="btn-group">
+            <button onclick="replaySolve(${s.id}, 1)">1x</button>
+            <button onclick="replaySolve(${s.id}, 2)">2x</button>
+            <button class="danger" onclick="deleteSolve(${s.id})">×</button>
+          </div>
+        </li>
       `).join('');
     }
+
     window.deleteSolve = (id) => {
       state.solves = state.solves.filter(s => s.id !== id);
       saveSolves();
       renderStats();
       renderHistory();
     };
+
     window.replaySolve = async (id, speed) => {
       const s = state.solves.find(x => x.id === id);
       const player = document.getElementById('player');
@@ -18,11 +510,13 @@
         player.play?.();
       } catch (err) {}
     };
+
     window.copyLastAlg = () => {
       if (!state.solves.length) return;
       const alg = state.solves[0].moves.map(m => m.m).join(' ');
       navigator.clipboard.writeText(alg).then(() => alert('Skopiowano algorytm do schowka!'));
     };
+
     window.exportCSV = () => {
       if (!state.solves.length) return alert('Brak ułożeń do eksportu.');
       const head = 'Nr,Czas (s),Ruchy,TPS,Scramble,Log ruchow\n';
@@ -37,6 +531,7 @@
       a.click();
       URL.revokeObjectURL(a.href);
     };
+
     // Inicjalizacja
     if (!navigator.bluetooth) {
       document.getElementById('bt-unsupported').style.display = 'block';
