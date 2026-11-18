@@ -226,10 +226,10 @@
       if (b) b.textContent = (err && err.name && err.message) ? (err.name + ": " + err.message) : String(err);
     });
 
-    import { TwistyPlayer } from "https://cdn.jsdelivr.net/npm/cubing@0.52.2/twisty/+esm";
-    import { connectSmartPuzzle } from "https://cdn.jsdelivr.net/npm/cubing@0.52.2/bluetooth/+esm";
-    import { Alg } from "https://cdn.jsdelivr.net/npm/cubing@0.52.2/alg/+esm";
-    import { puzzles } from "https://cdn.jsdelivr.net/npm/cubing@0.52.2/puzzles/+esm";
+    import { TwistyPlayer } from "https://esm.sh/cubing@0.52.2/twisty";
+    import { connectSmartPuzzle } from "https://esm.sh/cubing@0.52.2/bluetooth";
+    import { Alg } from "https://esm.sh/cubing@0.52.2/alg";
+    import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
 
     const state = {
       puzzle: null,
