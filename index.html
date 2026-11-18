@@ -83,6 +83,19 @@
       letter-spacing: 0.5px;
       line-height: 1.4;
     }
+    .player-wrap {
+      width: 100%;
+      height: 185px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      padding: 6px;
+    }
+    twisty-player { width: 100%; height: 100%; }
     .timer-wrap { text-align: center; padding: 8px 0; }
     .timer {
       font-family: ui-monospace, monospace;
@@ -198,6 +211,10 @@
 
     <div id="scramble-text" class="scramble-box">Generowanie...</div>
 
+    <div class="player-wrap">
+      <twisty-player id="player" puzzle="3x3x3" visualization="2D" control-panel="none" background="none"></twisty-player>
+    </div>
+
     <div class="timer-wrap">
       <div id="timer-val" class="timer">0.00</div>
       <div id="timer-sub" class="timer-sub">Kliknij „Gotowy”</div>
@@ -270,7 +287,10 @@
       console.error(e.reason);
     });
 
+    import { TwistyPlayer } from "https://esm.sh/cubing@0.52.2/twisty";
     import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
+
+    let player = document.getElementById('player');
 
     const state = {
       conn: null,
@@ -287,6 +307,21 @@
       moves: [],
       solves: []
     };
+
+    function resetCube2D() {
+      const wrap = document.querySelector('.player-wrap');
+      if (!wrap) return;
+      wrap.innerHTML = '';
+      const newPlayer = new TwistyPlayer({
+        puzzle: '3x3x3',
+        visualization: '2D',
+        controlPanel: 'none',
+        background: 'none'
+      });
+      newPlayer.id = 'player';
+      wrap.appendChild(newPlayer);
+      player = newPlayer;
+    }
 
     function loadSolves() {
       try { return JSON.parse(localStorage.getItem('gan_solves') || '[]'); } catch { return []; }
@@ -447,6 +482,12 @@
     function handleMove(move) {
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
+
+      const p = player || document.getElementById('player');
+      if (p?.experimentalAddMove) {
+        try { p.experimentalAddMove(str); } catch {}
+      }
+
       if (/^[xyz]/i.test(str)) return;
 
       if (state.trackingActive && state.timerState === 'IDLE') {
@@ -562,8 +603,16 @@
           if (ev.type === "MOVE") {
             handleMove(ev.move);
           } else if (ev.type === "FACELETS") {
-            if (state.timerState === 'RUNNING' && state.moves.length >= 3 && ev.facelets === "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB") {
-              finishSolve(performance.now());
+            // Elastyczne sprawdzenie ułożenia (dowolny jednolity ciąg lub standardowy układ)
+            const isSolved = !ev.facelets || 
+                             ev.facelets === "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB" ||
+                             /^(.)\1{8}(.)\2{8}(.)\3{8}(.)\4{8}(.)\5{8}(.)\6{8}$/.test(ev.facelets);
+            
+            if (isSolved) {
+              resetCube2D();
+              if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
+                finishSolve(performance.now());
+              }
             }
           } else if (ev.type === "BATTERY") {
             const bat = document.getElementById('battery-pill');
@@ -603,6 +652,7 @@
       state.moves = [];
       state.P = [];
       state.trackingActive = true;
+      resetCube2D();
       renderScramble();
 
       const btn = document.getElementById('btn-ready');
@@ -618,6 +668,7 @@
       state.timerState = 'IDLE';
       state.moves = [];
       state.P = [];
+      resetCube2D();
       const btn = document.getElementById('btn-ready');
       const val = document.getElementById('timer-val');
       const sub = document.getElementById('timer-sub');
