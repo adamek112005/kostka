@@ -160,7 +160,7 @@
 <body>
   <div class="app">
     <header>
-      <div id="status-badge" class="status-badge">Rozłączono</div>
+      <div id="status-badge" class="status-badge">Nie połączono</div>
       <div class="btn-group">
         <button id="btn-viz" onclick="toggleViz()">3D</button>
         <button onclick="resetModel()">Reset modelu</button>
@@ -217,13 +217,10 @@
 
   <script type="module">
     window.onerror = (msg, src, line, col, err) => {
-      const b = document.getElementById('status-badge');
-      if (b) b.textContent = err ? (err.name + ": " + err.message) : String(msg);
+      console.error(err || msg);
     };
     window.addEventListener('unhandledrejection', (e) => {
-      const err = e.reason;
-      const b = document.getElementById('status-badge');
-      if (b) b.textContent = (err && err.name && err.message) ? (err.name + ": " + err.message) : String(err);
+      console.error(e.reason);
     });
 
     import { TwistyPlayer } from "https://esm.sh/cubing@0.52.2/twisty";
@@ -231,16 +228,20 @@
     import { Alg } from "https://esm.sh/cubing@0.52.2/alg";
     import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
 
+    let player = document.getElementById('player');
+    window.player = player;
+
     const state = {
       conn: null,
       sub: null,
-      kpuzzle: null,
       timerState: 'IDLE', // IDLE, ARMED, RUNNING
       startTime: 0,
       rafId: null,
       scramble: '',
-      expectedPattern: null,
-      lastPattern: null,
+      S: [],
+      scrambleIdx: 0,
+      wrong: [],
+      trackingActive: false,
       moves: [],
       solves: [],
       viz: '3D'
@@ -267,14 +268,104 @@
       return res.join(' ');
     }
 
-    async function setScramble(str) {
+    function inv(m) {
+      if (m.endsWith("2")) return m;
+      if (m.endsWith("'")) return m.slice(0, -1);
+      return m + "'";
+    }
+
+    function renderScramble() {
+      const box = document.getElementById('scramble-text');
+      if (!box) return;
+
+      if (state.wrong.length > 0) {
+        box.style.borderColor = '#ef4444';
+      } else {
+        box.style.borderColor = '';
+      }
+
+      if (state.scrambleIdx === state.S.length && state.wrong.length === 0) {
+        box.innerHTML = '<span style="color:#22c55e;font-weight:700;">Scramble OK</span>';
+        return;
+      }
+
+      let undoHtml = '';
+      if (state.wrong.length > 0) {
+        const undoList = [...state.wrong].reverse().join(' ');
+        undoHtml = `<div style="color:#ef4444;font-weight:700;margin-bottom:6px;">Cofnij: ${undoList}</div>`;
+      }
+
+      const tokensHtml = state.S.map((tok, idx) => {
+        if (idx < state.scrambleIdx) {
+          return `<span style="opacity:0.3;text-decoration:line-through;">${tok}</span>`;
+        } else if (idx === state.scrambleIdx) {
+          return `<span style="font-weight:700;text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:4px;">${tok}</span>`;
+        } else {
+          return `<span>${tok}</span>`;
+        }
+      }).join(' ');
+
+      box.innerHTML = undoHtml + tokensHtml;
+    }
+
+    function armTimer() {
+      state.timerState = 'ARMED';
+      state.moves = [];
+      const btn = document.getElementById('btn-ready');
+      const val = document.getElementById('timer-val');
+      const sub = document.getElementById('timer-sub');
+      if (btn) {
+        btn.textContent = 'Uzbrojony (ruch startuje)';
+        btn.className = 'ready';
+      }
+      if (val) {
+        val.className = 'timer armed';
+        val.textContent = '0.00';
+      }
+      if (sub) {
+        sub.textContent = 'Wykonaj pierwszy ruch';
+      }
+    }
+
+    function onScrambleMove(m) {
+      const S = state.S;
+      const wrong = state.wrong;
+
+      if (wrong.length > 0) {
+        const top = wrong[wrong.length - 1];
+        if (m === top) {
+          wrong.pop();
+        } else {
+          wrong.push(inv(m));
+        }
+      } else if (state.scrambleIdx < S.length && m === S[state.scrambleIdx]) {
+        state.scrambleIdx++;
+      } else if (
+        state.scrambleIdx < S.length &&
+        S[state.scrambleIdx].endsWith('2') &&
+        (m === S[state.scrambleIdx][0] || m === S[state.scrambleIdx][0] + "'")
+      ) {
+        S[state.scrambleIdx] = m;
+      } else {
+        wrong.push(inv(m));
+      }
+
+      if (state.scrambleIdx === S.length && wrong.length === 0) {
+        state.trackingActive = false;
+        renderScramble();
+        armTimer();
+      } else {
+        renderScramble();
+      }
+    }
+
+    function setScramble(str) {
       state.scramble = str;
-      document.getElementById('scramble-text').textContent = str;
-      document.getElementById('scramble-warn').style.display = 'none';
-      try {
-        if (!state.kpuzzle) state.kpuzzle = await puzzles['3x3x3'].kpuzzle();
-        state.expectedPattern = state.kpuzzle.defaultPattern().applyAlg(new Alg(str));
-      } catch { state.expectedPattern = null; }
+      state.S = str.trim().split(/\s+/).filter(Boolean);
+      state.scrambleIdx = 0;
+      state.wrong = [];
+      state.trackingActive = true;
+      renderScramble();
     }
 
     function updateTimerDisplay() {
@@ -288,11 +379,16 @@
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
       const isRot = /^[xyz]/i.test(str);
-      const player = document.getElementById('player');
-      if (player?.experimentalAddMove) {
-        try { player.experimentalAddMove(str); } catch {}
+      const p = player || document.getElementById('player');
+      if (p?.experimentalAddMove) {
+        try { p.experimentalAddMove(str); } catch {}
       }
       if (isRot) return;
+
+      if (state.trackingActive && state.timerState === 'IDLE') {
+        onScrambleMove(str);
+        return;
+      }
 
       const now = performance.now();
       if (state.timerState === 'ARMED') {
@@ -344,7 +440,6 @@
       const btn = document.getElementById('btn-ready');
       const val = document.getElementById('timer-val');
       const sub = document.getElementById('timer-sub');
-      const warn = document.getElementById('scramble-warn');
 
       if (state.timerState === 'ARMED') {
         state.timerState = 'IDLE';
@@ -352,27 +447,12 @@
         btn.className = 'primary';
         val.className = 'timer';
         sub.textContent = 'Kliknij „Gotowy”';
-        warn.style.display = 'none';
         return;
       }
       if (state.timerState === 'RUNNING') return;
 
-      state.timerState = 'ARMED';
-      state.moves = [];
-      btn.textContent = 'Uzbrojony (ruch startuje)';
-      btn.className = 'ready';
-      val.className = 'timer armed';
-      val.textContent = '0.00';
-      sub.textContent = 'Wykonaj pierwszy ruch';
-
-      if (state.lastPattern && state.expectedPattern) {
-        let match = false;
-        try {
-          match = state.lastPattern.experimentalIsIdentical?.(state.expectedPattern) ||
-            JSON.stringify(state.lastPattern.patternData) === JSON.stringify(state.expectedPattern.patternData);
-        } catch {}
-        warn.style.display = match ? 'none' : 'block';
-      }
+      state.trackingActive = false;
+      armTimer();
     };
 
     window.toggleConnect = async () => {
@@ -385,9 +465,11 @@
             state.sub = null;
           }
           state.conn.disconnect();
-        } catch {}
+        } catch (err) {
+          console.error(err);
+        }
         state.conn = null;
-        badge.textContent = 'Rozłączono';
+        badge.textContent = 'Nie połączono';
         btn.textContent = 'Połącz';
         return;
       }
@@ -396,10 +478,10 @@
         return;
       }
       try {
-        badge.textContent = 'Łączenie...';
+        badge.textContent = 'Łączenie…';
         const conn = await connectGanCube(async (device, isFallback) => "0C:3D:5E:99:35:D6");
         state.conn = conn;
-        badge.textContent = 'Połączono: ' + (conn.device?.name || 'GAN');
+        badge.textContent = 'Połączono';
         btn.textContent = 'Rozłącz';
 
         state.sub = conn.events$.subscribe(ev => {
@@ -415,32 +497,70 @@
               state.sub = null;
             }
             state.conn = null;
-            badge.textContent = 'Rozłączono';
+            badge.textContent = 'Nie połączono';
             btn.textContent = 'Połącz';
           }
         });
 
         await conn.sendCubeCommand({ type: "REQUEST_FACELETS" });
       } catch (err) {
-        badge.textContent = err.name + ": " + err.message;
+        console.error(err);
+        badge.textContent = 'Nie połączono';
         btn.textContent = 'Połącz';
       }
     };
 
     window.toggleViz = () => {
       state.viz = state.viz === '3D' ? '2D' : '3D';
-      document.getElementById('player').visualization = state.viz;
+      const p = player || document.getElementById('player');
+      if (p) p.visualization = state.viz;
       document.getElementById('btn-viz').textContent = state.viz;
     };
 
     window.resetModel = () => {
-      const player = document.getElementById('player');
-      if (player) {
-        try { player.alg = new Alg(); } catch { player.alg = ''; }
+      const wrap = document.querySelector('.player-wrap');
+      if (wrap) {
+        wrap.innerHTML = '';
+        const newPlayer = new TwistyPlayer({
+          puzzle: '3x3x3',
+          visualization: state.viz,
+          controlPanel: 'none',
+          background: 'none'
+        });
+        newPlayer.id = 'player';
+        wrap.appendChild(newPlayer);
+        player = newPlayer;
+        window.player = newPlayer;
       }
+
+      state.moves = [];
+      state.scrambleIdx = 0;
+      state.wrong = [];
+      state.trackingActive = true;
+      renderScramble();
+
+      cancelAnimationFrame(state.rafId);
+      state.timerState = 'IDLE';
+      const btn = document.getElementById('btn-ready');
+      const val = document.getElementById('timer-val');
+      const sub = document.getElementById('timer-sub');
+      if (btn) { btn.textContent = 'Gotowy'; btn.className = 'primary'; }
+      if (val) { val.className = 'timer'; val.textContent = '0.00'; }
+      if (sub) { sub.textContent = 'Kliknij „Gotowy”'; }
     };
 
-    window.nextScramble = () => setScramble(genScramble());
+    window.nextScramble = () => {
+      cancelAnimationFrame(state.rafId);
+      state.timerState = 'IDLE';
+      state.moves = [];
+      const btn = document.getElementById('btn-ready');
+      const val = document.getElementById('timer-val');
+      const sub = document.getElementById('timer-sub');
+      if (btn) { btn.textContent = 'Gotowy'; btn.className = 'primary'; }
+      if (val) { val.className = 'timer'; val.textContent = '0.00'; }
+      if (sub) { sub.textContent = 'Kliknij „Gotowy”'; }
+      setScramble(genScramble());
+    };
 
     function calcAo(arr, n) {
       if (arr.length < n) return '-';
@@ -500,15 +620,17 @@
 
     window.replaySolve = async (id, speed) => {
       const s = state.solves.find(x => x.id === id);
-      const player = document.getElementById('player');
-      if (!s || !player) return;
+      const p = player || document.getElementById('player');
+      if (!s || !p) return;
       try {
-        player.experimentalSetupAlg = new Alg(s.scramble);
-        player.alg = new Alg(s.moves.map(m => m.m).join(' '));
-        player.tempoScale = speed;
-        player.jumpToStart?.();
-        player.play?.();
-      } catch (err) {}
+        p.experimentalSetupAlg = new Alg(s.scramble);
+        p.alg = new Alg(s.moves.map(m => m.m).join(' '));
+        p.tempoScale = speed;
+        p.jumpToStart?.();
+        p.play?.();
+      } catch (err) {
+        console.error(err);
+      }
     };
 
     window.copyLastAlg = () => {
