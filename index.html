@@ -288,9 +288,18 @@
     });
 
     import { TwistyPlayer } from "https://esm.sh/cubing@0.52.2/twisty";
+    import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
     import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
 
     let player = document.getElementById('player');
+    let kpuzzle = null;
+    let kstate = null;
+
+    // Inicjalizacja matematycznego modelu kostki 3x3x3 do natychmiastowego wykrywania ułożenia po każdym ruchu
+    puzzles["3x3x3"].kpuzzle().then(kp => {
+      kpuzzle = kp;
+      kstate = kp.defaultPattern();
+    }).catch(console.error);
 
     const state = {
       conn: null,
@@ -309,6 +318,9 @@
     };
 
     function resetCube2D() {
+      if (kpuzzle) {
+        kstate = kpuzzle.defaultPattern();
+      }
       const wrap = document.querySelector('.player-wrap');
       if (!wrap) return;
       wrap.innerHTML = '';
@@ -321,6 +333,24 @@
       newPlayer.id = 'player';
       wrap.appendChild(newPlayer);
       player = newPlayer;
+    }
+
+    function isFaceletsSolved(facelets) {
+      if (!facelets || typeof facelets !== 'string' || facelets.length !== 54) return false;
+      for (let i = 0; i < 54; i += 9) {
+        const c = facelets[i];
+        for (let j = 1; j < 9; j++) {
+          if (facelets[i + j] !== c) return false;
+        }
+      }
+      return true;
+    }
+
+    function checkSolvedAndFinish(now) {
+      if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
+        finishSolve(now);
+        resetCube2D();
+      }
     }
 
     function loadSolves() {
@@ -483,9 +513,24 @@
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
 
+      const now = performance.now();
+
+      // 1. Aktualizacja modelu 2D na ekranie
       const p = player || document.getElementById('player');
       if (p?.experimentalAddMove) {
         try { p.experimentalAddMove(str); } catch {}
+      }
+
+      // 2. Aktualizacja wirtualnego stanu permutacji kostki (KPuzzle)
+      let isSolvedByModel = false;
+      if (kpuzzle && kstate) {
+        try {
+          kstate = kstate.applyMove(str);
+          // Sprawdź, czy stan odpowiada ułożonej kostce (ignorując obrót całej bryły x/y/z)
+          isSolvedByModel = kstate.experimentalIsSolved({ ignorePuzzleOrientation: true, ignoreCenterOrientation: true });
+        } catch (e) {
+          console.error(e);
+        }
       }
 
       if (/^[xyz]/i.test(str)) return;
@@ -495,7 +540,6 @@
         return;
       }
 
-      const now = performance.now();
       if (state.timerState === 'ARMED') {
         state.timerState = 'RUNNING';
         state.startTime = now;
@@ -509,6 +553,17 @@
         const count = state.moves.length;
         const curTps = (count / ((now - state.startTime) / 1000)).toFixed(2);
         document.getElementById('timer-sub').textContent = `${count} ruchów | ${curTps} TPS`;
+
+        // Natychmiastowe zatrzymanie, jeśli matematyczny model wykryje ułożenie po tym ruchu
+        if (isSolvedByModel && count >= 3) {
+          checkSolvedAndFinish(now);
+          return;
+        }
+
+        // Dodatkowo odpytaj fizyczną kostkę o facelets po ruchu
+        if (state.conn) {
+          state.conn.sendCubeCommand({ type: "REQUEST_FACELETS" }).catch(() => {});
+        }
       }
     }
 
@@ -554,7 +609,12 @@
         sub.textContent = 'Kliknij „Gotowy”';
         return;
       }
-      if (state.timerState === 'RUNNING') return;
+      if (state.timerState === 'RUNNING') {
+        // Awaryjne ręczne zatrzymanie kliknięciem w przycisk podczas układania
+        finishSolve(performance.now());
+        resetCube2D();
+        return;
+      }
 
       state.trackingActive = false;
       armTimer();
@@ -602,16 +662,12 @@
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
             handleMove(ev.move);
-          } else if (ev.type === "FACELETS") {
-            // Elastyczne sprawdzenie ułożenia (dowolny jednolity ciąg lub standardowy układ)
-            const isSolved = !ev.facelets || 
-                             ev.facelets === "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB" ||
-                             /^(.)\1{8}(.)\2{8}(.)\3{8}(.)\4{8}(.)\5{8}(.)\6{8}$/.test(ev.facelets);
-            
-            if (isSolved) {
-              resetCube2D();
+          } else if (ev.type === "FACELETS" || ev.type === "STATE") {
+            if (isFaceletsSolved(ev.facelets)) {
               if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
-                finishSolve(performance.now());
+                checkSolvedAndFinish(performance.now());
+              } else {
+                resetCube2D();
               }
             }
           } else if (ev.type === "BATTERY") {
