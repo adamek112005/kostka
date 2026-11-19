@@ -45,7 +45,8 @@
     }
     .app { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 14px; }
     header { display: flex; justify-content: space-between; align-items: center; padding-top: 8px; }
-    .status-badge { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); }
+    .status-badge { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 6px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
     .btn-group { display: flex; gap: 8px; }
     button {
       font-family: inherit;
@@ -175,7 +176,32 @@
       z-index: 100;
     }
     dialog#stats-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
-    dialog#disconnect-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+    dialog#disconnect-dialog::backdrop,
+    dialog#solve-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+    body.solving header,
+    body.solving .banner,
+    body.solving .scramble-box,
+    body.solving .scramble-controls,
+    body.solving .stats-card,
+    body.solving .solves-card,
+    body.solving .action-bar,
+    body.solving .timer-sub {
+      display: none !important;
+    }
+    .solve-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--bg);
+      font-size: 0.85rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    .solve-row:hover {
+      filter: brightness(0.95);
+    }
     .dialog-inner {
       width: 100%;
       max-width: 460px;
@@ -202,7 +228,7 @@
 <body>
   <div class="app">
     <header>
-      <div id="status-badge" class="status-badge" onclick="handleStatusClick()" style="cursor:pointer;user-select:none;">Not connected</div>
+      <div id="status-badge" class="status-badge" onclick="handleStatusClick()" style="cursor:pointer;user-select:none;"><span class="status-dot" style="background:#ef4444;"></span> Connect</div>
       <div id="battery-pill" class="status-badge">Battery: —</div>
     </header>
 
@@ -225,14 +251,21 @@
     <div class="timer-wrap">
       <div id="timer-val" class="timer">0.00</div>
       <div id="timer-sub" class="timer-sub">Ready</div>
+      <button id="btn-dnf" class="danger" onclick="markDnf()" style="display:none;margin:12px auto 0 auto;font-weight:700;padding:8px 24px;">DNF</button>
     </div>
 
     <div class="stats-card">
-      <div class="stats-grid">
-        <div><div id="st-best" class="stat-val">-</div><div class="stat-lbl">Best</div></div>
-        <div><div id="st-ao5" class="stat-val">-</div><div class="stat-lbl">ao5</div></div>
-        <div><div id="st-mean" class="stat-val">-</div><div class="stat-lbl">Mean</div></div>
+      <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr);">
+        <div><div id="st-best" class="stat-val">—</div><div class="stat-lbl">Best</div></div>
+        <div><div id="st-ao5" class="stat-val">—</div><div class="stat-lbl">ao5</div></div>
+        <div><div id="st-ao50" class="stat-val">—</div><div class="stat-lbl">ao50</div></div>
+        <div><div id="st-ao100" class="stat-val">—</div><div class="stat-lbl">ao100</div></div>
       </div>
+    </div>
+
+    <div class="solves-card" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;">
+      <div style="font-size:0.85rem;font-weight:600;">Recent solves</div>
+      <div id="main-solves-list" style="max-height:160px;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:4px;"></div>
     </div>
   </div>
 
@@ -247,6 +280,15 @@
     <div style="display:flex;justify-content:center;gap:12px;">
       <button class="danger" onclick="confirmDisconnect()">Disconnect</button>
       <button onclick="document.getElementById('disconnect-dialog').close()">Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog id="solve-dialog" style="border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:20px;max-width:320px;margin:auto;">
+    <div id="solve-dialog-info" style="font-weight:600;font-size:1rem;margin-bottom:16px;text-align:center;">Solve</div>
+    <div style="display:flex;justify-content:center;gap:8px;">
+      <button class="danger" onclick="deleteSelectedSolve()">Delete</button>
+      <button onclick="copySelectedSolveMoves()">Copy moves</button>
+      <button onclick="closeSolveDialog()">Close</button>
     </div>
   </dialog>
 
@@ -277,16 +319,9 @@
         <div class="chart-box" style="margin-top:12px;">
           <svg id="chart-svg" width="100%" height="100%" viewBox="0 0 300 50" preserveAspectRatio="none"></svg>
         </div>
-      </div>
-
-      <div class="history-card">
-        <div class="history-head">
-          <span>Solve history (<span id="solves-count">0</span>)</span>
-          <div class="btn-group">
-            <button onclick="exportCSV()">Export CSV</button>
-          </div>
+        <div style="margin-top:12px;display:flex;justify-content:center;">
+          <button onclick="exportCSV()" style="width:100%;padding:10px 16px;">Export CSV</button>
         </div>
-        <ul id="history-list" class="history-list" style="max-height:none;overflow-y:visible;"></ul>
       </div>
     </div>
   </dialog>
@@ -318,6 +353,8 @@
       sub: null,
       connecting: false,
       batteryTimer: null,
+      dnfTimer: null,
+      selectedSolveId: null,
       timerState: 'IDLE', // IDLE, ARMED, RUNNING
       startTime: 0,
       rafId: null,
@@ -333,33 +370,95 @@
     };
 
     function resetCube2D() {
-      if (kpuzzle) {
-        kstate = kpuzzle.defaultPattern();
-      }
-      const wrap = document.querySelector('.player-wrap');
-      if (!wrap) return;
-      wrap.innerHTML = '';
-      const newPlayer = new TwistyPlayer({
-        puzzle: '3x3x3',
-        visualization: '2D',
-        controlPanel: 'none',
-        background: 'none'
-      });
-      newPlayer.id = 'player';
-      wrap.appendChild(newPlayer);
-      player = newPlayer;
+      if (kpuzzle) { kstate = kpuzzle.defaultPattern(); }
+      const p = player || document.getElementById('player');
+      if (!p) return;
+      try {
+        p.experimentalSetupAlg = "";
+        p.alg = "";
+        p.jumpToStart?.();
+      } catch (e) { console.error(e); }
     }
 
-    function isFaceletsSolved(facelets) {
-      if (!facelets || typeof facelets !== 'string' || facelets.length !== 54) return false;
-      for (let i = 0; i < 54; i += 9) {
-        const c = facelets[i];
-        for (let j = 1; j < 9; j++) {
-          if (facelets[i + j] !== c) return false;
+    function computeMoveCount(moves) {
+      if (!moves || !moves.length) return 0;
+      const filtered = moves
+        .map(x => (typeof x === 'string' ? x : x.m))
+        .filter(m => m && !/^[xyz]/i.test(m));
+      let count = 0;
+      let i = 0;
+      while (i < filtered.length) {
+        const cur = filtered[i];
+        const next = filtered[i + 1];
+        if (next && cur === next && !cur.includes('2')) {
+          count++;
+          i += 2;
+        } else {
+          count++;
+          i++;
         }
       }
-      return true;
+      return count;
     }
+
+    function clearDnfTimer() {
+      if (state.dnfTimer) {
+        clearTimeout(state.dnfTimer);
+        state.dnfTimer = null;
+      }
+      const btn = document.getElementById('btn-dnf');
+      if (btn) btn.style.display = 'none';
+    }
+
+    function startDnfTimer() {
+      clearDnfTimer();
+      state.dnfTimer = setTimeout(() => {
+        if (state.timerState === 'RUNNING') {
+          const btn = document.getElementById('btn-dnf');
+          if (btn) btn.style.display = 'inline-block';
+        }
+      }, 3000);
+    }
+
+    window.markDnf = () => {
+      if (state.timerState !== 'RUNNING') return;
+      cancelAnimationFrame(state.rafId);
+      clearDnfTimer();
+      state.timerState = 'IDLE';
+      document.body.classList.remove('solving');
+
+      const endTime = performance.now();
+      const totalMs = Math.round(endTime - state.startTime);
+      const sec = (totalMs / 1000).toFixed(2);
+      const moveCount = computeMoveCount(state.moves);
+      const tps = (totalMs > 0) ? (moveCount / (totalMs / 1000)).toFixed(2) : '0.00';
+
+      const val = document.getElementById('timer-val');
+      if (val) {
+        val.className = 'timer';
+        val.textContent = 'DNF';
+      }
+      const sub = document.getElementById('timer-sub');
+      if (sub) {
+        sub.textContent = 'DNF';
+      }
+
+      state.solves.unshift({
+        id: Date.now(),
+        time: parseFloat(sec),
+        ms: totalMs,
+        count: moveCount,
+        tps: parseFloat(tps),
+        scramble: state.scramble,
+        moves: state.moves,
+        dnf: true
+      });
+      saveSolves();
+      renderMainStats();
+      renderSolvesList();
+      renderDetailedStats();
+      nextScramble();
+    };
 
     function checkSolvedAndFinish(now) {
       if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
@@ -471,7 +570,6 @@
       const sub = document.getElementById('timer-sub');
       if (val) {
         val.className = 'timer armed';
-        val.textContent = '0.00';
       }
       if (sub) {
         sub.textContent = 'Ready';
@@ -560,62 +658,79 @@
         state.timerState = 'RUNNING';
         state.startTime = now;
         state.moves = [{ m: str, t: 0 }];
-        document.getElementById('timer-val').className = 'timer running';
+        const val = document.getElementById('timer-val');
+        if (val) {
+          val.className = 'timer running';
+          val.textContent = '0.00';
+        }
+        document.body.classList.add('solving');
+        startDnfTimer();
         state.rafId = requestAnimationFrame(updateTimerDisplay);
       } else if (state.timerState === 'RUNNING') {
+        startDnfTimer();
         state.moves.push({ m: str, t: Math.round(now - state.startTime) });
-        const count = state.moves.length;
+        const count = computeMoveCount(state.moves);
         const curTps = (count / ((now - state.startTime) / 1000)).toFixed(2);
-        document.getElementById('timer-sub').textContent = `${count} moves | ${curTps} TPS`;
+        const sub = document.getElementById('timer-sub');
+        if (sub) sub.textContent = `${count} moves | ${curTps} TPS`;
 
         if (isSolvedByModel && count >= 3) {
           checkSolvedAndFinish(now);
           return;
-        }
-
-        if (state.conn) {
-          state.conn.sendCubeCommand({ type: "REQUEST_FACELETS" }).catch(() => {});
         }
       }
     }
 
     function finishSolve(endTime) {
       cancelAnimationFrame(state.rafId);
+      clearDnfTimer();
       state.timerState = 'IDLE';
+      document.body.classList.remove('solving');
+
       const totalMs = Math.round(endTime - state.startTime);
       const sec = (totalMs / 1000).toFixed(2);
-      const count = state.moves.length;
-      const tps = (count / (totalMs / 1000)).toFixed(2);
+      const moveCount = computeMoveCount(state.moves);
+      const tps = (totalMs > 0) ? (moveCount / (totalMs / 1000)).toFixed(2) : '0.00';
 
-      document.getElementById('timer-val').className = 'timer';
-      document.getElementById('timer-val').textContent = sec;
-      document.getElementById('timer-sub').textContent = `Completed! ${count} moves | ${tps} TPS`;
+      const val = document.getElementById('timer-val');
+      if (val) {
+        val.className = 'timer';
+        val.textContent = sec;
+      }
+      const sub = document.getElementById('timer-sub');
+      if (sub) {
+        sub.textContent = `Completed! ${moveCount} moves | ${tps} TPS`;
+      }
 
       state.solves.unshift({
         id: Date.now(),
         time: parseFloat(sec),
         ms: totalMs,
-        count,
+        count: moveCount,
         tps: parseFloat(tps),
         scramble: state.scramble,
-        moves: state.moves
+        moves: state.moves,
+        dnf: false
       });
       saveSolves();
       renderMainStats();
+      renderSolvesList();
       renderDetailedStats();
       nextScramble();
     }
 
     function resetTrackingAndTimer() {
       cancelAnimationFrame(state.rafId);
+      clearDnfTimer();
       state.timerState = 'IDLE';
+      document.body.classList.remove('solving');
       state.moves = [];
       state.P = [];
       state.trackingActive = true;
       resetCube2D();
       const val = document.getElementById('timer-val');
       const sub = document.getElementById('timer-sub');
-      if (val) { val.className = 'timer'; val.textContent = '0.00'; }
+      if (val) { val.className = 'timer'; }
       if (sub) { sub.textContent = 'Ready'; }
     }
 
@@ -654,6 +769,18 @@
       renderScramble();
     };
 
+    function renderStatusBadge(status) {
+      const badge = document.getElementById('status-badge');
+      if (!badge) return;
+      if (status === 'connected') {
+        badge.innerHTML = '<span class="status-dot" style="background:#22c55e;"></span> Connected';
+      } else if (status === 'connecting') {
+        badge.innerHTML = '<span class="status-dot" style="background:#94a3b8;"></span> Connecting…';
+      } else {
+        badge.innerHTML = '<span class="status-dot" style="background:#ef4444;"></span> Connect';
+      }
+    }
+
     function clearBattery() {
       if (state.batteryTimer) {
         clearInterval(state.batteryTimer);
@@ -682,8 +809,7 @@
         try { state.conn.disconnect(); } catch {}
         state.conn = null;
       }
-      const badge = document.getElementById('status-badge');
-      if (badge) badge.textContent = 'Not connected';
+      renderStatusBadge('disconnected');
     };
 
     async function connectCube() {
@@ -691,26 +817,17 @@
         document.getElementById('bt-unsupported').style.display = 'block';
         return;
       }
-      const badge = document.getElementById('status-badge');
       state.connecting = true;
-      if (badge) badge.textContent = 'Connecting…';
+      renderStatusBadge('connecting');
       try {
         const conn = await connectGanCube(async (device, isFallback) => "0C:3D:5E:99:35:D6");
         state.conn = conn;
         state.connecting = false;
-        if (badge) badge.textContent = 'Connected';
+        renderStatusBadge('connected');
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
             handleMove(ev.move);
-          } else if (ev.type === "FACELETS" || ev.type === "STATE") {
-            if (isFaceletsSolved(ev.facelets)) {
-              if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
-                checkSolvedAndFinish(performance.now());
-              } else {
-                resetCube2D();
-              }
-            }
           } else if (ev.type === "BATTERY") {
             const bat = document.getElementById('battery-pill');
             if (bat) bat.textContent = `Battery: ${ev.batteryLevel}%`;
@@ -721,7 +838,7 @@
               state.sub = null;
             }
             state.conn = null;
-            if (badge) badge.textContent = 'Not connected';
+            renderStatusBadge('disconnected');
           }
         });
 
@@ -738,7 +855,7 @@
         console.error(err);
         state.connecting = false;
         clearBattery();
-        if (badge) badge.textContent = 'Not connected';
+        renderStatusBadge('disconnected');
       }
     }
 
@@ -774,22 +891,55 @@
     }
 
     function renderMainStats() {
-      const list = state.solves;
-      if (!list.length) {
-        ['st-best', 'st-ao5', 'st-mean'].forEach(id => document.getElementById(id).textContent = '-');
+      const valid = state.solves.filter(s => !s.dnf);
+      const bestEl = document.getElementById('st-best');
+      const ao5El = document.getElementById('st-ao5');
+      const ao50El = document.getElementById('st-ao50');
+      const ao100El = document.getElementById('st-ao100');
+
+      if (!valid.length) {
+        if (bestEl) bestEl.textContent = '—';
+        if (ao5El) ao5El.textContent = '—';
+        if (ao50El) ao50El.textContent = '—';
+        if (ao100El) ao100El.textContent = '—';
         return;
       }
-      const times = list.map(x => x.time);
-      document.getElementById('st-best').textContent = Math.min(...times).toFixed(2);
-      document.getElementById('st-ao5').textContent = calcTrimmedMean(list, 5);
-      document.getElementById('st-mean').textContent = (times.reduce((a, b) => a + b, 0) / times.length).toFixed(2);
+      const times = valid.map(x => x.time);
+      if (bestEl) bestEl.textContent = Math.min(...times).toFixed(2);
+      if (ao5El) ao5El.textContent = calcTrimmedMean(valid, 5);
+      if (ao50El) ao50El.textContent = calcTrimmedMean(valid, 50);
+      if (ao100El) ao100El.textContent = calcTrimmedMean(valid, 100);
+    }
+
+    function renderSolvesList() {
+      const container = document.getElementById('main-solves-list');
+      if (!container) return;
+      const total = state.solves.length;
+      if (!total) {
+        container.innerHTML = '<div style="color:var(--sub);font-size:0.8rem;text-align:center;padding:8px 0;">No solves yet</div>';
+        return;
+      }
+      const slice = state.solves.slice(0, 100);
+      container.innerHTML = slice.map((s, i) => {
+        const seq = total - i;
+        const timeDisplay = s.dnf ? 'DNF' : s.time.toFixed(2) + 's';
+        const timeStyle = s.dnf ? 'color:var(--danger);font-weight:700;' : 'font-weight:700;';
+        return `
+          <div class="solve-row" onclick="openSolveDialog(${s.id})">
+            <span style="color:var(--sub);font-family:ui-monospace,monospace;font-size:0.8rem;min-width:38px;">#${seq}</span>
+            <span style="min-width:65px;font-family:ui-monospace,monospace;${timeStyle}">${timeDisplay}</span>
+            <span style="color:var(--sub);font-family:ui-monospace,monospace;font-size:0.8rem;">${s.count} moves</span>
+            <span style="color:var(--sub);font-family:ui-monospace,monospace;font-size:0.8rem;">${s.tps} TPS</span>
+          </div>
+        `;
+      }).join('');
     }
 
     function renderDetailedStats() {
       const d = document.getElementById('stats-dialog');
       if (!d || !d.open) return;
 
-      const list = state.solves;
+      const list = state.solves.filter(s => !s.dnf);
       const times = list.map(x => x.time);
       const count = list.length;
 
@@ -799,8 +949,6 @@
           document.getElementById(id).textContent = '—';
         });
         document.getElementById('chart-svg').innerHTML = '';
-        document.getElementById('solves-count').textContent = '0';
-        document.getElementById('history-list').innerHTML = '';
         return;
       }
 
@@ -819,8 +967,6 @@
       document.getElementById('dt-tps').textContent = (list.reduce((a, b) => a + b.tps, 0) / count).toFixed(2);
       document.getElementById('dt-moves').textContent = (list.reduce((a, b) => a + b.count, 0) / count).toFixed(1);
 
-      document.getElementById('solves-count').textContent = count;
-
       const svg = document.getElementById('chart-svg');
       if (count < 2) {
         svg.innerHTML = '';
@@ -835,23 +981,6 @@
         }).join(' ');
         svg.innerHTML = `<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${pts}" />`;
       }
-
-      const ul = document.getElementById('history-list');
-      ul.innerHTML = list.map(s => `
-        <li class="history-item">
-          <div style="display:flex;flex-direction:column;gap:2px;">
-            <div>
-              <strong>${s.time.toFixed(2)}s</strong>
-              <span class="history-meta">(${s.count} moves, ${s.tps} TPS)</span>
-            </div>
-            <div style="font-family:ui-monospace,monospace;font-size:0.75rem;color:var(--sub);word-break:break-word;">${s.scramble}</div>
-          </div>
-          <div class="btn-group">
-            <button onclick="copyMoves(${s.id})">Copy moves</button>
-            <button class="danger" onclick="deleteSolve(${s.id})">×</button>
-          </div>
-        </li>
-      `).join('');
     }
 
     window.openStats = () => {
@@ -878,26 +1007,52 @@
       }
     });
 
-    window.deleteSolve = (id) => {
-      state.solves = state.solves.filter(s => s.id !== id);
-      saveSolves();
-      renderMainStats();
-      renderDetailedStats();
-    };
-
-    window.copyMoves = (id) => {
+    window.openSolveDialog = (id) => {
+      state.selectedSolveId = id;
       const s = state.solves.find(x => x.id === id);
       if (!s) return;
-      const moves = s.moves.map(m => m.m).join(' ');
+      const total = state.solves.length;
+      const idx = state.solves.indexOf(s);
+      const seq = total - idx;
+      const title = `#${seq}: ${s.dnf ? 'DNF' : s.time.toFixed(2) + 's'} (${s.count} moves, ${s.tps} TPS)`;
+      const infoEl = document.getElementById('solve-dialog-info');
+      if (infoEl) infoEl.textContent = title;
+      const d = document.getElementById('solve-dialog');
+      if (d) d.showModal();
+    };
+
+    window.closeSolveDialog = () => {
+      const d = document.getElementById('solve-dialog');
+      if (d?.open) d.close();
+    };
+
+    window.deleteSelectedSolve = () => {
+      if (state.selectedSolveId == null) return;
+      state.solves = state.solves.filter(s => s.id !== state.selectedSolveId);
+      saveSolves();
+      renderMainStats();
+      renderSolvesList();
+      renderDetailedStats();
+      closeSolveDialog();
+    };
+
+    window.copySelectedSolveMoves = () => {
+      if (state.selectedSolveId == null) return;
+      const s = state.solves.find(x => x.id === state.selectedSolveId);
+      if (!s) return;
+      const moves = (s.moves || []).map(m => m.m).join(' ');
       navigator.clipboard.writeText(moves);
+      closeSolveDialog();
     };
 
     window.exportCSV = () => {
       if (!state.solves.length) return alert('No solves to export.');
-      const head = 'No,Time (s),Moves,TPS,Scramble,Move log\n';
+      const head = 'No,Time (s),Moves,TPS,Status,Scramble,Move log\n';
       const rows = state.solves.map((s, i) => {
-        const movesLog = s.moves.map(m => `${m.m}@${m.t}`).join(' ');
-        return `${state.solves.length - i},${s.time},${s.count},${s.tps},"${s.scramble}","${movesLog}"`;
+        const movesLog = (s.moves || []).map(m => `${m.m}@${m.t}`).join(' ');
+        const status = s.dnf ? 'DNF' : 'OK';
+        const timeVal = s.dnf ? 'DNF' : s.time;
+        return `${state.solves.length - i},${timeVal},${s.count},${s.tps},${status},"${s.scramble}","${movesLog}"`;
       }).join('\n');
       const blob = new Blob([head + rows], { type: 'text/csv;charset=utf-8;' });
       const a = document.createElement('a');
@@ -912,6 +1067,7 @@
     }
     state.solves = loadSolves();
     renderMainStats();
+    renderSolvesList();
     nextScramble();
   </script>
 </body>
