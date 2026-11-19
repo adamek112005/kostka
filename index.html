@@ -85,8 +85,11 @@
       letter-spacing: 0.5px;
       line-height: 1.4;
     }
-    .scramble-controls { display: flex; justify-content: center; gap: 8px; }
-    .scramble-controls button { min-width: 48px; font-weight: 600; }
+    .scramble-controls { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .scramble-controls > button { min-width: 48px; font-weight: 600; }
+    .seg-ctrl { display: inline-flex; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 2px; gap: 2px; }
+    .seg-btn { min-width: 0 !important; padding: 6px 10px !important; font-size: 0.8rem !important; font-weight: 600 !important; border: none !important; background: transparent !important; color: var(--sub) !important; border-radius: 6px !important; cursor: pointer; line-height: 1; }
+    .seg-btn.active { background: var(--accent) !important; color: #fff !important; }
     .player-wrap {
       width: 100%;
       height: 185px;
@@ -186,7 +189,8 @@
     body.solving .solves-card,
     body.solving .action-bar,
     body.solving .timer-sub {
-      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
     }
     .solve-row {
       display: flex;
@@ -242,6 +246,11 @@
       <button id="btn-prev-scramble" onclick="prevScramble()" disabled>←</button>
       <button onclick="reset()">Reset</button>
       <button id="btn-next-scramble" onclick="nextScramble()">→</button>
+      <div class="seg-ctrl" id="sim-switch">
+        <button type="button" class="seg-btn active" data-mode="2D" onclick="setSimMode('2D')">2D</button>
+        <button type="button" class="seg-btn" data-mode="3D" onclick="setSimMode('3D')">3D</button>
+        <button type="button" class="seg-btn" data-mode="Off" onclick="setSimMode('Off')">Off</button>
+      </div>
     </div>
 
     <div class="player-wrap">
@@ -355,6 +364,7 @@
       batteryTimer: null,
       dnfTimer: null,
       selectedSolveId: null,
+      simMode: '2D',
       timerState: 'IDLE', // IDLE, ARMED, RUNNING
       startTime: 0,
       rafId: null,
@@ -379,6 +389,38 @@
         p.jumpToStart?.();
       } catch (e) { console.error(e); }
     }
+
+    function setSimMode(mode) {
+      if (mode !== '2D' && mode !== '3D' && mode !== 'Off') {
+        mode = '2D';
+      }
+      state.simMode = mode;
+      try {
+        localStorage.setItem('gan_sim_mode', mode);
+      } catch (e) {
+        console.error(e);
+      }
+
+      document.querySelectorAll('.seg-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-mode') === mode);
+      });
+
+      const p = player || document.getElementById('player');
+      const wrap = document.querySelector('.player-wrap');
+
+      if (mode === 'Off') {
+        if (wrap) wrap.style.visibility = 'hidden';
+        if (p) p.style.visibility = 'hidden';
+      } else {
+        if (wrap) wrap.style.visibility = 'visible';
+        if (p) {
+          p.style.visibility = 'visible';
+          p.visualization = mode;
+          try { p.setAttribute('visualization', mode); } catch {}
+        }
+      }
+    }
+    window.setSimMode = setSimMode;
 
     function computeMoveCount(moves) {
       if (!moves || !moves.length) return 0;
@@ -417,7 +459,7 @@
           const btn = document.getElementById('btn-dnf');
           if (btn) btn.style.display = 'inline-block';
         }
-      }, 3000);
+      }, 1500);
     }
 
     window.markDnf = () => {
@@ -1065,6 +1107,16 @@
     if (!navigator.bluetooth) {
       document.getElementById('bt-unsupported').style.display = 'block';
     }
+    let initialSimMode = '2D';
+    try {
+      const savedMode = localStorage.getItem('gan_sim_mode');
+      if (savedMode === '2D' || savedMode === '3D' || savedMode === 'Off') {
+        initialSimMode = savedMode;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setSimMode(initialSimMode);
     state.solves = loadSolves();
     renderMainStats();
     renderSolvesList();
