@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pl">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
@@ -59,6 +59,7 @@
       font-size: 0.9rem;
       touch-action: manipulation;
     }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     button.ready { background: var(--ready); color: #fff; border-color: var(--ready); }
     button.danger { color: var(--danger); }
@@ -83,6 +84,8 @@
       letter-spacing: 0.5px;
       line-height: 1.4;
     }
+    .scramble-controls { display: flex; justify-content: center; gap: 8px; }
+    .scramble-controls button { min-width: 48px; font-weight: 600; }
     .player-wrap {
       width: 100%;
       height: 185px;
@@ -154,8 +157,8 @@
       justify-content: center;
       z-index: 10;
     }
-    .action-inner { width: 100%; max-width: 460px; display: grid; grid-template-columns: 1.5fr 1fr 1fr 1.2fr; gap: 8px; }
-    .action-bar button { padding: 12px 4px; font-size: 0.88rem; }
+    .action-inner { width: 100%; max-width: 460px; display: flex; }
+    .action-bar button { width: 100%; padding: 12px 16px; font-size: 1rem; }
     dialog#stats-dialog {
       position: fixed;
       inset: 0;
@@ -172,6 +175,7 @@
       z-index: 100;
     }
     dialog#stats-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+    dialog#disconnect-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
     .dialog-inner {
       width: 100%;
       max-width: 460px;
@@ -198,18 +202,21 @@
 <body>
   <div class="app">
     <header>
-      <div id="status-badge" class="status-badge">Nie połączono</div>
-      <div class="btn-group">
-        <div id="battery-pill" class="status-badge">Bateria: —</div>
-        <button onclick="reset()">Reset</button>
-      </div>
+      <div id="status-badge" class="status-badge" onclick="handleStatusClick()" style="cursor:pointer;user-select:none;">Not connected</div>
+      <div id="battery-pill" class="status-badge">Battery: —</div>
     </header>
 
     <div id="bt-unsupported" class="banner" style="border-color:var(--danger);color:var(--danger);">
-      Brak Web Bluetooth. Użyj Chrome/Edge na Androidzie lub Bluefy na iPhone.
+      Web Bluetooth is not supported. Use Chrome/Edge on Android or Bluefy on iOS.
     </div>
 
-    <div id="scramble-text" class="scramble-box">Generowanie...</div>
+    <div id="scramble-text" class="scramble-box">Generating…</div>
+
+    <div class="scramble-controls">
+      <button id="btn-prev-scramble" onclick="prevScramble()" disabled>←</button>
+      <button onclick="reset()">Reset</button>
+      <button id="btn-next-scramble" onclick="nextScramble()">→</button>
+    </div>
 
     <div class="player-wrap">
       <twisty-player id="player" puzzle="3x3x3" visualization="2D" control-panel="none" background="none"></twisty-player>
@@ -217,50 +224,55 @@
 
     <div class="timer-wrap">
       <div id="timer-val" class="timer">0.00</div>
-      <div id="timer-sub" class="timer-sub">Kliknij „Gotowy”</div>
+      <div id="timer-sub" class="timer-sub">Ready</div>
     </div>
 
     <div class="stats-card">
       <div class="stats-grid">
-        <div><div id="st-best" class="stat-val">-</div><div class="stat-lbl">Najlepszy</div></div>
+        <div><div id="st-best" class="stat-val">-</div><div class="stat-lbl">Best</div></div>
         <div><div id="st-ao5" class="stat-val">-</div><div class="stat-lbl">ao5</div></div>
-        <div><div id="st-mean" class="stat-val">-</div><div class="stat-lbl">Średnia</div></div>
+        <div><div id="st-mean" class="stat-val">-</div><div class="stat-lbl">Mean</div></div>
       </div>
     </div>
   </div>
 
   <div class="action-bar">
     <div class="action-inner">
-      <button id="btn-ready" class="primary" onclick="toggleReady()">Gotowy</button>
-      <button id="btn-conn" onclick="toggleConnect()">Połącz</button>
-      <button onclick="nextScramble()">Nowy</button>
-      <button onclick="openStats()">Statystyki</button>
+      <button class="primary" onclick="openStats()">Statistics</button>
     </div>
   </div>
+
+  <dialog id="disconnect-dialog" style="border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:20px;max-width:300px;margin:auto;">
+    <div style="font-weight:600;font-size:1rem;margin-bottom:16px;text-align:center;">Disconnect the cube?</div>
+    <div style="display:flex;justify-content:center;gap:12px;">
+      <button class="danger" onclick="confirmDisconnect()">Disconnect</button>
+      <button onclick="document.getElementById('disconnect-dialog').close()">Cancel</button>
+    </div>
+  </dialog>
 
   <dialog id="stats-dialog">
     <div class="dialog-inner">
       <div class="dialog-head">
-        <h2 style="font-size:1.1rem;font-weight:700;">Statystyki</h2>
+        <h2 style="font-size:1.1rem;font-weight:700;">Statistics</h2>
         <button onclick="closeStats()" style="padding:6px 12px;font-size:1.1rem;line-height:1;">✕</button>
       </div>
 
       <div class="stats-card">
         <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:10px;">
-          <div><div class="stat-lbl">Liczba ułożeń</div><div id="dt-count" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Najlepszy</div><div id="dt-best" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Najgorszy</div><div id="dt-worst" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Średnia</div><div id="dt-mean" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Mediana</div><div id="dt-median" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Odchylenie std.</div><div id="dt-sd" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Solves</div><div id="dt-count" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Best</div><div id="dt-best" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Worst</div><div id="dt-worst" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Mean</div><div id="dt-mean" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Median</div><div id="dt-median" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Std. dev.</div><div id="dt-sd" class="stat-val">—</div></div>
           <div><div class="stat-lbl">ao5</div><div id="dt-ao5" class="stat-val">—</div></div>
           <div><div class="stat-lbl">ao12</div><div id="dt-ao12" class="stat-val">—</div></div>
           <div><div class="stat-lbl">ao50</div><div id="dt-ao50" class="stat-val">—</div></div>
           <div><div class="stat-lbl">ao100</div><div id="dt-ao100" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Najlepsze ao5</div><div id="dt-best-ao5" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Najlepsze ao12</div><div id="dt-best-ao12" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Średnie TPS</div><div id="dt-tps" class="stat-val">—</div></div>
-          <div><div class="stat-lbl">Średnia liczba ruchów</div><div id="dt-moves" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Best ao5</div><div id="dt-best-ao5" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Best ao12</div><div id="dt-best-ao12" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Average TPS</div><div id="dt-tps" class="stat-val">—</div></div>
+          <div><div class="stat-lbl">Average moves</div><div id="dt-moves" class="stat-val">—</div></div>
         </div>
         <div class="chart-box" style="margin-top:12px;">
           <svg id="chart-svg" width="100%" height="100%" viewBox="0 0 300 50" preserveAspectRatio="none"></svg>
@@ -269,9 +281,9 @@
 
       <div class="history-card">
         <div class="history-head">
-          <span>Historia ułożeń (<span id="solves-count">0</span>)</span>
+          <span>Solve history (<span id="solves-count">0</span>)</span>
           <div class="btn-group">
-            <button onclick="exportCSV()">CSV</button>
+            <button onclick="exportCSV()">Export CSV</button>
           </div>
         </div>
         <ul id="history-list" class="history-list" style="max-height:none;overflow-y:visible;"></ul>
@@ -287,6 +299,7 @@
       console.error(e.reason);
     });
 
+    import { randomScrambleForEvent } from "https://esm.sh/cubing@0.52.2/scramble";
     import { TwistyPlayer } from "https://esm.sh/cubing@0.52.2/twisty";
     import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
     import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
@@ -295,7 +308,6 @@
     let kpuzzle = null;
     let kstate = null;
 
-    // Inicjalizacja matematycznego modelu kostki 3x3x3 do natychmiastowego wykrywania ułożenia po każdym ruchu
     puzzles["3x3x3"].kpuzzle().then(kp => {
       kpuzzle = kp;
       kstate = kp.defaultPattern();
@@ -304,10 +316,13 @@
     const state = {
       conn: null,
       sub: null,
+      connecting: false,
       batteryTimer: null,
       timerState: 'IDLE', // IDLE, ARMED, RUNNING
       startTime: 0,
       rafId: null,
+      scrambles: [],
+      scrambleIndex: -1,
       scramble: '',
       rawTokens: [],
       S: [],
@@ -374,6 +389,15 @@
       return res.join(' ');
     }
 
+    async function generateScrambleString() {
+      try {
+        return (await randomScrambleForEvent("333")).toString();
+      } catch (e) {
+        console.error(e);
+        return genScramble(20);
+      }
+    }
+
     function parseMove(str) {
       const f = str[0].toUpperCase();
       let q = 1;
@@ -420,7 +444,7 @@
       let undoHtml = '';
       if (isWrong) {
         const undoMoves = rest.slice().reverse().map(e => formatMove(e.f, (4 - e.q) % 4)).join(' ');
-        undoHtml = `<div style="color:#ef4444;font-weight:700;margin-bottom:6px;">Cofnij: ${undoMoves}</div>`;
+        undoHtml = `<div style="color:#ef4444;font-weight:700;margin-bottom:6px;">Undo: ${undoMoves}</div>`;
       }
 
       const tokensHtml = state.rawTokens.map((tok, idx) => {
@@ -428,7 +452,7 @@
           return `<span style="opacity:0.3;text-decoration:line-through;">${tok}</span>`;
         } else if (idx === k) {
           if (isPartial) {
-            return `<span style="color:#f97316;font-weight:700;">${tok}</span>`;
+            return `<span style="color:#eab308;font-weight:700;">${tok}</span>`;
           } else {
             return `<span style="font-weight:700;text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:4px;">${tok}</span>`;
           }
@@ -443,19 +467,14 @@
     function armTimer() {
       state.timerState = 'ARMED';
       state.moves = [];
-      const btn = document.getElementById('btn-ready');
       const val = document.getElementById('timer-val');
       const sub = document.getElementById('timer-sub');
-      if (btn) {
-        btn.textContent = 'Gotowy';
-        btn.className = 'ready';
-      }
       if (val) {
         val.className = 'timer armed';
         val.textContent = '0.00';
       }
       if (sub) {
-        sub.textContent = 'Wykonaj pierwszy ruch';
+        sub.textContent = 'Ready';
       }
     }
 
@@ -495,7 +514,7 @@
 
     function setScramble(str) {
       state.scramble = str;
-      state.rawTokens = str.trim().split(/\s+/).filter(Boolean);
+      state.rawTokens = str.trim().split(/\s+/).filter(tok => /^[URFDLB]/i.test(tok));
       state.S = state.rawTokens.map(parseMove);
       state.P = [];
       state.trackingActive = true;
@@ -515,18 +534,15 @@
 
       const now = performance.now();
 
-      // 1. Aktualizacja modelu 2D na ekranie
       const p = player || document.getElementById('player');
       if (p?.experimentalAddMove) {
         try { p.experimentalAddMove(str); } catch {}
       }
 
-      // 2. Aktualizacja wirtualnego stanu permutacji kostki (KPuzzle)
       let isSolvedByModel = false;
       if (kpuzzle && kstate) {
         try {
           kstate = kstate.applyMove(str);
-          // Sprawdź, czy stan odpowiada ułożonej kostce (ignorując obrót całej bryły x/y/z)
           isSolvedByModel = kstate.experimentalIsSolved({ ignorePuzzleOrientation: true, ignoreCenterOrientation: true });
         } catch (e) {
           console.error(e);
@@ -545,22 +561,18 @@
         state.startTime = now;
         state.moves = [{ m: str, t: 0 }];
         document.getElementById('timer-val').className = 'timer running';
-        document.getElementById('btn-ready').textContent = 'Układanie...';
-        document.getElementById('btn-ready').className = 'primary';
         state.rafId = requestAnimationFrame(updateTimerDisplay);
       } else if (state.timerState === 'RUNNING') {
         state.moves.push({ m: str, t: Math.round(now - state.startTime) });
         const count = state.moves.length;
         const curTps = (count / ((now - state.startTime) / 1000)).toFixed(2);
-        document.getElementById('timer-sub').textContent = `${count} ruchów | ${curTps} TPS`;
+        document.getElementById('timer-sub').textContent = `${count} moves | ${curTps} TPS`;
 
-        // Natychmiastowe zatrzymanie, jeśli matematyczny model wykryje ułożenie po tym ruchu
         if (isSolvedByModel && count >= 3) {
           checkSolvedAndFinish(now);
           return;
         }
 
-        // Dodatkowo odpytaj fizyczną kostkę o facelets po ruchu
         if (state.conn) {
           state.conn.sendCubeCommand({ type: "REQUEST_FACELETS" }).catch(() => {});
         }
@@ -577,9 +589,7 @@
 
       document.getElementById('timer-val').className = 'timer';
       document.getElementById('timer-val').textContent = sec;
-      document.getElementById('timer-sub').textContent = `Ukończono! ${count} ruchów | ${tps} TPS`;
-      document.getElementById('btn-ready').textContent = 'Gotowy';
-      document.getElementById('btn-ready').className = 'primary';
+      document.getElementById('timer-sub').textContent = `Completed! ${count} moves | ${tps} TPS`;
 
       state.solves.unshift({
         id: Date.now(),
@@ -593,31 +603,55 @@
       saveSolves();
       renderMainStats();
       renderDetailedStats();
-      setScramble(genScramble());
+      nextScramble();
     }
 
-    window.toggleReady = () => {
-      const btn = document.getElementById('btn-ready');
+    function resetTrackingAndTimer() {
+      cancelAnimationFrame(state.rafId);
+      state.timerState = 'IDLE';
+      state.moves = [];
+      state.P = [];
+      state.trackingActive = true;
+      resetCube2D();
       const val = document.getElementById('timer-val');
       const sub = document.getElementById('timer-sub');
+      if (val) { val.className = 'timer'; val.textContent = '0.00'; }
+      if (sub) { sub.textContent = 'Ready'; }
+    }
 
-      if (state.timerState === 'ARMED') {
-        state.timerState = 'IDLE';
-        btn.textContent = 'Gotowy';
-        btn.className = 'primary';
-        val.className = 'timer';
-        sub.textContent = 'Kliknij „Gotowy”';
-        return;
-      }
-      if (state.timerState === 'RUNNING') {
-        // Awaryjne ręczne zatrzymanie kliknięciem w przycisk podczas układania
-        finishSolve(performance.now());
-        resetCube2D();
-        return;
-      }
+    function updateScrambleButtons() {
+      const btn = document.getElementById('btn-prev-scramble');
+      if (btn) btn.disabled = state.scrambleIndex <= 0;
+    }
 
-      state.trackingActive = false;
-      armTimer();
+    function loadScrambleIndex(idx) {
+      state.scrambleIndex = idx;
+      updateScrambleButtons();
+      resetTrackingAndTimer();
+      setScramble(state.scrambles[idx]);
+    }
+
+    window.prevScramble = () => {
+      if (state.scrambleIndex > 0) {
+        loadScrambleIndex(state.scrambleIndex - 1);
+      }
+    };
+
+    window.nextScramble = async () => {
+      if (state.scrambleIndex < state.scrambles.length - 1) {
+        loadScrambleIndex(state.scrambleIndex + 1);
+      } else {
+        const box = document.getElementById('scramble-text');
+        if (box) box.textContent = 'Generating…';
+        const s = await generateScrambleString();
+        state.scrambles.push(s);
+        loadScrambleIndex(state.scrambles.length - 1);
+      }
+    };
+
+    window.reset = () => {
+      resetTrackingAndTimer();
+      renderScramble();
     };
 
     function clearBattery() {
@@ -626,38 +660,45 @@
         state.batteryTimer = null;
       }
       const bat = document.getElementById('battery-pill');
-      if (bat) bat.textContent = 'Bateria: —';
+      if (bat) bat.textContent = 'Battery: —';
     }
 
-    window.toggleConnect = async () => {
-      const badge = document.getElementById('status-badge');
-      const btn = document.getElementById('btn-conn');
+    window.handleStatusClick = () => {
       if (state.conn) {
-        clearBattery();
-        try {
-          if (state.sub) {
-            state.sub.unsubscribe();
-            state.sub = null;
-          }
-          state.conn.disconnect();
-        } catch (err) {
-          console.error(err);
-        }
-        state.conn = null;
-        badge.textContent = 'Nie połączono';
-        btn.textContent = 'Połącz';
-        return;
+        document.getElementById('disconnect-dialog').showModal();
+      } else if (!state.connecting) {
+        connectCube();
       }
+    };
+
+    window.confirmDisconnect = () => {
+      document.getElementById('disconnect-dialog').close();
+      clearBattery();
+      if (state.sub) {
+        try { state.sub.unsubscribe(); } catch {}
+        state.sub = null;
+      }
+      if (state.conn) {
+        try { state.conn.disconnect(); } catch {}
+        state.conn = null;
+      }
+      const badge = document.getElementById('status-badge');
+      if (badge) badge.textContent = 'Not connected';
+    };
+
+    async function connectCube() {
       if (!navigator.bluetooth) {
         document.getElementById('bt-unsupported').style.display = 'block';
         return;
       }
+      const badge = document.getElementById('status-badge');
+      state.connecting = true;
+      if (badge) badge.textContent = 'Connecting…';
       try {
-        badge.textContent = 'Łączenie…';
         const conn = await connectGanCube(async (device, isFallback) => "0C:3D:5E:99:35:D6");
         state.conn = conn;
-        badge.textContent = 'Połączono';
-        btn.textContent = 'Rozłącz';
+        state.connecting = false;
+        if (badge) badge.textContent = 'Connected';
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
@@ -672,16 +713,15 @@
             }
           } else if (ev.type === "BATTERY") {
             const bat = document.getElementById('battery-pill');
-            if (bat) bat.textContent = `Bateria: ${ev.batteryLevel}%`;
+            if (bat) bat.textContent = `Battery: ${ev.batteryLevel}%`;
           } else if (ev.type === "DISCONNECT") {
             clearBattery();
             if (state.sub) {
-              state.sub.unsubscribe();
+              try { state.sub.unsubscribe(); } catch {}
               state.sub = null;
             }
             state.conn = null;
-            badge.textContent = 'Nie połączono';
-            btn.textContent = 'Połącz';
+            if (badge) badge.textContent = 'Not connected';
           }
         });
 
@@ -696,43 +736,11 @@
         }, 60000);
       } catch (err) {
         console.error(err);
+        state.connecting = false;
         clearBattery();
-        badge.textContent = 'Nie połączono';
-        btn.textContent = 'Połącz';
+        if (badge) badge.textContent = 'Not connected';
       }
-    };
-
-    window.reset = () => {
-      cancelAnimationFrame(state.rafId);
-      state.timerState = 'IDLE';
-      state.moves = [];
-      state.P = [];
-      state.trackingActive = true;
-      resetCube2D();
-      renderScramble();
-
-      const btn = document.getElementById('btn-ready');
-      const val = document.getElementById('timer-val');
-      const sub = document.getElementById('timer-sub');
-      if (btn) { btn.textContent = 'Gotowy'; btn.className = 'primary'; }
-      if (val) { val.className = 'timer'; val.textContent = '0.00'; }
-      if (sub) { sub.textContent = 'Kliknij „Gotowy”'; }
-    };
-
-    window.nextScramble = () => {
-      cancelAnimationFrame(state.rafId);
-      state.timerState = 'IDLE';
-      state.moves = [];
-      state.P = [];
-      resetCube2D();
-      const btn = document.getElementById('btn-ready');
-      const val = document.getElementById('timer-val');
-      const sub = document.getElementById('timer-sub');
-      if (btn) { btn.textContent = 'Gotowy'; btn.className = 'primary'; }
-      if (val) { val.className = 'timer'; val.textContent = '0.00'; }
-      if (sub) { sub.textContent = 'Kliknij „Gotowy”'; }
-      setScramble(genScramble());
-    };
+    }
 
     function calcTrimmedMean(arr, n) {
       if (arr.length < n) return '—';
@@ -834,12 +842,12 @@
           <div style="display:flex;flex-direction:column;gap:2px;">
             <div>
               <strong>${s.time.toFixed(2)}s</strong>
-              <span class="history-meta">(${s.count} ruchów, ${s.tps} TPS)</span>
+              <span class="history-meta">(${s.count} moves, ${s.tps} TPS)</span>
             </div>
             <div style="font-family:ui-monospace,monospace;font-size:0.75rem;color:var(--sub);word-break:break-word;">${s.scramble}</div>
           </div>
           <div class="btn-group">
-            <button onclick="copyMoves(${s.id})">Kopiuj</button>
+            <button onclick="copyMoves(${s.id})">Copy moves</button>
             <button class="danger" onclick="deleteSolve(${s.id})">×</button>
           </div>
         </li>
@@ -885,8 +893,8 @@
     };
 
     window.exportCSV = () => {
-      if (!state.solves.length) return alert('Brak ułożeń do eksportu.');
-      const head = 'Nr,Czas (s),Ruchy,TPS,Scramble,Log ruchow\n';
+      if (!state.solves.length) return alert('No solves to export.');
+      const head = 'No,Time (s),Moves,TPS,Scramble,Move log\n';
       const rows = state.solves.map((s, i) => {
         const movesLog = s.moves.map(m => `${m.m}@${m.t}`).join(' ');
         return `${state.solves.length - i},${s.time},${s.count},${s.tps},"${s.scramble}","${movesLog}"`;
@@ -899,13 +907,12 @@
       URL.revokeObjectURL(a.href);
     };
 
-    // Inicjalizacja
     if (!navigator.bluetooth) {
       document.getElementById('bt-unsupported').style.display = 'block';
     }
     state.solves = loadSolves();
     renderMainStats();
-    setScramble(genScramble());
+    nextScramble();
   </script>
 </body>
 </html>
