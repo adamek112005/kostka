@@ -439,12 +439,11 @@
       }
 
       wrap.style.visibility = 'visible';
-    if (p) {
-  p.style.visibility = 'visible';
-  const targetVis = mode === '3D' ? '3D' : '2D';
-  try { p.visualization = targetVis; } catch {}
-  try { p.setAttribute('visualization', targetVis); } catch {}
-}
+      if (p) {
+        p.style.visibility = 'visible';
+        const targetVis = mode === '3D' ? '3D' : '2D';
+        try { p.visualization = targetVis; } catch {}
+        try { p.setAttribute('visualization', targetVis); } catch {}
         if (prevMode !== mode) {
           syncPlayerMoves(p);
         }
@@ -918,7 +917,7 @@
         await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
-            if (state.conn) await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
+            if (state.conn) await state.conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
           } catch (err) {
             console.error(err);
           }
