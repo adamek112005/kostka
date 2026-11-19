@@ -379,26 +379,31 @@
       solves: []
     };
 
-    function buildPlayer(mode) {
-      const wrap = document.querySelector('.player-wrap');
-      if (!wrap) return null;
-      wrap.innerHTML = '';
-      const newPlayer = new TwistyPlayer({
-        puzzle: '3x3x3',
-        visualization: mode === '3D' ? '3D' : '2D',
-        controlPanel: 'none',
-        background: 'none'
-      });
-      newPlayer.id = 'player';
-      wrap.appendChild(newPlayer);
-      player = newPlayer;
-      return newPlayer;
+    function getPlayer() {
+      if (!player || !document.body.contains(player)) {
+        player = document.getElementById('player');
+      }
+      return player;
+    }
+
+    function syncPlayerMoves(p) {
+      if (!p) return;
+      try {
+        p.experimentalSetupAlg = "";
+        p.alg = "";
+        p.jumpToStart?.();
+      } catch {}
+      const applied = state.timerState === 'RUNNING'
+        ? state.moves.map(m => m.m)
+        : state.P.map(e => formatMove(e.f, e.q));
+      for (const mv of applied) {
+        try { p.experimentalAddMove(mv); } catch {}
+      }
     }
 
     function resetCube2D() {
       if (kpuzzle) { kstate = kpuzzle.defaultPattern(); }
-      if (state.simMode === 'Off') return;
-      const p = buildPlayer(state.simMode);
+      const p = getPlayer();
       if (!p) return;
       try {
         p.experimentalSetupAlg = "";
@@ -424,23 +429,25 @@
       });
 
       const wrap = document.querySelector('.player-wrap');
+      const p = getPlayer();
       if (!wrap) return;
 
       if (mode === 'Off') {
         wrap.style.visibility = 'hidden';
+        if (p) p.style.visibility = 'hidden';
         return;
       }
 
       wrap.style.visibility = 'visible';
-      if (prevMode !== mode || !document.getElementById('player')) {
-        const p = buildPlayer(mode);
-        if (p) {
-          const applied = state.timerState === 'RUNNING'
-            ? state.moves.map(m => m.m)
-            : state.P.map(e => formatMove(e.f, e.q));
-          for (const mv of applied) {
-            try { p.experimentalAddMove(mv); } catch {}
-          }
+      if (p) {
+        p.style.visibility = 'visible';
+        const targetVis = mode === '3D' ? '3D' : '2D';
+        if (p.visualization !== targetVis) {
+          p.visualization = targetVis;
+          try { p.setAttribute('visualization', targetVis); } catch {}
+        }
+        if (prevMode !== mode) {
+          syncPlayerMoves(p);
         }
       }
     }
@@ -912,7 +919,7 @@
         await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
-            if (state.conn) await state.conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
+            if (state.conn) await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
           } catch (err) {
             console.error(err);
           }
