@@ -379,9 +379,26 @@
       solves: []
     };
 
+    function buildPlayer(mode) {
+      const wrap = document.querySelector('.player-wrap');
+      if (!wrap) return null;
+      wrap.innerHTML = '';
+      const newPlayer = new TwistyPlayer({
+        puzzle: '3x3x3',
+        visualization: mode === '3D' ? '3D' : '2D',
+        controlPanel: 'none',
+        background: 'none'
+      });
+      newPlayer.id = 'player';
+      wrap.appendChild(newPlayer);
+      player = newPlayer;
+      return newPlayer;
+    }
+
     function resetCube2D() {
       if (kpuzzle) { kstate = kpuzzle.defaultPattern(); }
-      const p = player || document.getElementById('player');
+      if (state.simMode === 'Off') return;
+      const p = buildPlayer(state.simMode);
       if (!p) return;
       try {
         p.experimentalSetupAlg = "";
@@ -394,6 +411,7 @@
       if (mode !== '2D' && mode !== '3D' && mode !== 'Off') {
         mode = '2D';
       }
+      const prevMode = state.simMode;
       state.simMode = mode;
       try {
         localStorage.setItem('gan_sim_mode', mode);
@@ -405,18 +423,24 @@
         btn.classList.toggle('active', btn.getAttribute('data-mode') === mode);
       });
 
-      const p = player || document.getElementById('player');
       const wrap = document.querySelector('.player-wrap');
+      if (!wrap) return;
 
       if (mode === 'Off') {
-        if (wrap) wrap.style.visibility = 'hidden';
-        if (p) p.style.visibility = 'hidden';
-      } else {
-        if (wrap) wrap.style.visibility = 'visible';
+        wrap.style.visibility = 'hidden';
+        return;
+      }
+
+      wrap.style.visibility = 'visible';
+      if (prevMode !== mode || !document.getElementById('player')) {
+        const p = buildPlayer(mode);
         if (p) {
-          p.style.visibility = 'visible';
-          p.visualization = mode;
-          try { p.setAttribute('visualization', mode); } catch {}
+          const applied = state.timerState === 'RUNNING'
+            ? state.moves.map(m => m.m)
+            : state.P.map(e => formatMove(e.f, e.q));
+          for (const mv of applied) {
+            try { p.experimentalAddMove(mv); } catch {}
+          }
         }
       }
     }
@@ -675,7 +699,7 @@
       const now = performance.now();
 
       const p = player || document.getElementById('player');
-      if (p?.experimentalAddMove) {
+      if (p?.experimentalAddMove && state.simMode !== 'Off') {
         try { p.experimentalAddMove(str); } catch {}
       }
 
