@@ -255,6 +255,7 @@
 
     <div class="player-wrap">
       <twisty-player id="player" puzzle="3x3x3" visualization="2D" control-panel="none" background="none"></twisty-player>
+      <div id="three-wrap" style="display:none;width:100%;height:100%;position:relative;cursor:grab;touch-action:none;"></div>
     </div>
 
     <div class="timer-wrap">
@@ -343,10 +344,11 @@
       console.error(e.reason);
     });
 
-    import { randomScrambleForEvent } from "https://esm.sh/cubing@latest/scramble";
-    import { TwistyPlayer } from "https://esm.sh/cubing@latest/twisty";
-    import { puzzles } from "https://esm.sh/cubing@latest/puzzles";
+    import { randomScrambleForEvent } from "https://esm.sh/cubing@0.52.2/scramble";
+    import { TwistyPlayer } from "https://esm.sh/cubing@0.52.2/twisty";
+    import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
     import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
+    import * as THREE from "https://esm.sh/three@0.170.0";
 
     let player = document.getElementById('player');
     let kpuzzle = null;
@@ -403,6 +405,7 @@
 
     function resetCube2D() {
       if (kpuzzle) { kstate = kpuzzle.defaultPattern(); }
+      threeCube.reset();
       const p = getPlayer();
       if (!p) return;
       try {
@@ -411,6 +414,292 @@
         p.jumpToStart?.();
       } catch (e) { console.error(e); }
     }
+
+    // --- Independent Three.js 3D Cube Preview ---
+    const threeCube = (() => {
+      let scene = null, camera = null, renderer = null, rootGroup = null;
+      let cubies = [];
+      let animId = null;
+      let initialized = false;
+      let activeTurn = null;
+      const queue = [];
+
+      const COLORS = {
+        U: 0xf8fafc,
+        D: 0xfacc15,
+        R: 0xef4444,
+        L: 0xf97316,
+        F: 0x22c55e,
+        B: 0x3b82f6,
+        core: 0x0f172a
+      };
+
+      function createCubie(x, y, z) {
+        const size = 0.94;
+        const gap = 1.02;
+        const mats = [
+          new THREE.MeshStandardMaterial({ color: x === 1 ? COLORS.R : COLORS.core, roughness: 0.35, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: x === -1 ? COLORS.L : COLORS.core, roughness: 0.35, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: y === 1 ? COLORS.U : COLORS.core, roughness: 0.35, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: y === -1 ? COLORS.D : COLORS.core, roughness: 0.35, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: z === 1 ? COLORS.F : COLORS.core, roughness: 0.35, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: z === -1 ? COLORS.B : COLORS.core, roughness: 0.35, metalness: 0.05 })
+        ];
+        const geo = new THREE.BoxGeometry(size, size, size);
+        const mesh = new THREE.Mesh(geo, mats);
+        mesh.position.set(x * gap, y * gap, z * gap);
+        return mesh;
+      }
+
+      function rebuildCubies() {
+        if (!rootGroup) return;
+        while (rootGroup.children.length > 0) {
+          rootGroup.remove(rootGroup.children[0]);
+        }
+        cubies = [];
+        activeTurn = null;
+        queue.length = 0;
+        for (let x = -1; x <= 1; x++) {
+          for (let y = -1; y <= 1; y++) {
+            for (let z = -1; z <= 1; z++) {
+              const c = createCubie(x, y, z);
+              rootGroup.add(c);
+              cubies.push(c);
+            }
+          }
+        }
+      }
+
+      function init() {
+        if (initialized) {
+          resize();
+          return;
+        }
+        const wrap = document.getElementById('three-wrap');
+        if (!wrap) return;
+
+        scene = new THREE.Scene();
+        const w = Math.max(wrap.clientWidth, 100);
+        const h = Math.max(wrap.clientHeight, 100);
+        camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
+        camera.position.set(4.6, 3.9, 5.2);
+        camera.lookAt(0, 0, 0);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(w, h);
+        wrap.innerHTML = '';
+        wrap.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 1.35));
+        const dir1 = new THREE.DirectionalLight(0xffffff, 1.1);
+        dir1.position.set(5, 8, 6);
+        scene.add(dir1);
+        const dir2 = new THREE.DirectionalLight(0xffffff, 0.5);
+        dir2.position.set(-5, -4, -5);
+        scene.add(dir2);
+
+        rootGroup = new THREE.Group();
+        rootGroup.rotation.set(0.22, -0.35, 0);
+        scene.add(rootGroup);
+
+        rebuildCubies();
+
+        let dragging = false;
+        let lastX = 0, lastY = 0;
+        const dom = renderer.domElement;
+        dom.addEventListener('pointerdown', (e) => {
+          dragging = true;
+          lastX = e.clientX;
+          lastY = e.clientY;
+          dom.style.cursor = 'grabbing';
+        });
+        window.addEventListener('pointermove', (e) => {
+          if (!dragging || !rootGroup) return;
+          const dx = e.clientX - lastX;
+          const dy = e.clientY - lastY;
+          lastX = e.clientX;
+          lastY = e.clientY;
+          rootGroup.rotation.y += dx * 0.012;
+          rootGroup.rotation.x += dy * 0.012;
+        });
+        window.addEventListener('pointerup', () => {
+          dragging = false;
+          if (dom) dom.style.cursor = 'grab';
+        });
+
+        window.addEventListener('resize', resize);
+        initialized = true;
+        startLoop();
+      }
+
+      function resize() {
+        const wrap = document.getElementById('three-wrap');
+        if (!wrap || !renderer || !camera) return;
+        const w = Math.max(wrap.clientWidth, 100);
+        const h = Math.max(wrap.clientHeight, 100);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+      }
+
+      function parseMoveSpec(moveStr) {
+        if (!moveStr || typeof moveStr !== 'string') return null;
+        const m = moveStr.trim().match(/^([URFDLBXYZ])(2|')?$/i);
+        if (!m) return null;
+        const face = m[1].toUpperCase();
+        const mod = m[2] || '';
+        let turns = 1;
+        if (mod === '2') turns = 2;
+        else if (mod === "'") turns = -1;
+
+        let axis = 'y', layer = null, dir = 1;
+        switch (face) {
+          case 'U': axis = 'y'; layer = 1; dir = -1; break;
+          case 'D': axis = 'y'; layer = -1; dir = 1; break;
+          case 'R': axis = 'x'; layer = 1; dir = -1; break;
+          case 'L': axis = 'x'; layer = -1; dir = 1; break;
+          case 'F': axis = 'z'; layer = 1; dir = -1; break;
+          case 'B': axis = 'z'; layer = -1; dir = 1; break;
+          case 'X': axis = 'x'; layer = null; dir = -1; break;
+          case 'Y': axis = 'y'; layer = null; dir = -1; break;
+          case 'Z': axis = 'z'; layer = null; dir = -1; break;
+          default: return null;
+        }
+        return { axis, layer, angle: dir * turns * (Math.PI / 2) };
+      }
+
+      function beginNextTurn() {
+        if (activeTurn || queue.length === 0) return;
+        const spec = queue.shift();
+        const pivot = new THREE.Group();
+        pivot.rotation.set(0, 0, 0);
+        rootGroup.add(pivot);
+
+        const moving = [];
+        for (const c of cubies) {
+          if (spec.layer === null) {
+            moving.push(c);
+          } else {
+            const coord = Math.round(c.position[spec.axis] / 1.02);
+            if (coord === spec.layer) moving.push(c);
+          }
+        }
+        for (const c of moving) {
+          rootGroup.remove(c);
+          pivot.add(c);
+        }
+        activeTurn = {
+          axis: spec.axis,
+          targetAngle: spec.angle,
+          currentAngle: 0,
+          pivot,
+          moving
+        };
+      }
+
+      function finishActiveTurn() {
+        if (!activeTurn) return;
+        const { axis, targetAngle, pivot, moving } = activeTurn;
+        pivot.rotation[axis] = targetAngle;
+        pivot.updateMatrixWorld();
+        for (const c of moving) {
+          c.applyMatrix4(pivot.matrix);
+          c.position.set(
+            Math.round(c.position.x / 1.02) * 1.02,
+            Math.round(c.position.y / 1.02) * 1.02,
+            Math.round(c.position.z / 1.02) * 1.02
+          );
+          const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
+          const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
+          c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+          pivot.remove(c);
+          rootGroup.add(c);
+        }
+        rootGroup.remove(pivot);
+        activeTurn = null;
+        beginNextTurn();
+      }
+
+      let lastFrameTime = 0;
+      function startLoop() {
+        if (animId) return;
+        lastFrameTime = performance.now();
+        const tick = (now) => {
+          animId = requestAnimationFrame(tick);
+          const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
+          lastFrameTime = now;
+
+          if (!activeTurn && queue.length > 0) {
+            beginNextTurn();
+          }
+          if (activeTurn) {
+            const speed = 14;
+            const step = Math.sign(activeTurn.targetAngle) * speed * dt;
+            const nextAngle = activeTurn.currentAngle + step;
+            if (Math.abs(nextAngle) >= Math.abs(activeTurn.targetAngle)) {
+              finishActiveTurn();
+            } else {
+              activeTurn.currentAngle = nextAngle;
+              activeTurn.pivot.rotation[activeTurn.axis] = nextAngle;
+            }
+          }
+          if (renderer && scene && camera && state.simMode === '3D') {
+            renderer.render(scene, camera);
+          }
+        };
+        animId = requestAnimationFrame(tick);
+      }
+
+      return {
+        show() {
+          init();
+          const wrap = document.getElementById('three-wrap');
+          if (wrap) wrap.style.display = 'block';
+          resize();
+        },
+        hide() {
+          const wrap = document.getElementById('three-wrap');
+          if (wrap) wrap.style.display = 'none';
+        },
+        addMove(moveStr) {
+          const spec = parseMoveSpec(moveStr);
+          if (!spec) return;
+          if (!initialized) init();
+          queue.push(spec);
+          if (!activeTurn) beginNextTurn();
+        },
+        reset() {
+          if (!initialized) return;
+          rebuildCubies();
+        },
+        applyMovesInstant(movesList) {
+          if (!initialized) init();
+          rebuildCubies();
+          for (const mv of movesList) {
+            const spec = parseMoveSpec(mv);
+            if (!spec) continue;
+            const pivot = new THREE.Group();
+            pivot.rotation[spec.axis] = spec.angle;
+            pivot.updateMatrix();
+            for (const c of cubies) {
+              const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.02);
+              if (spec.layer === null || coord === spec.layer) {
+                c.applyMatrix4(pivot.matrix);
+                c.position.set(
+                  Math.round(c.position.x / 1.02) * 1.02,
+                  Math.round(c.position.y / 1.02) * 1.02,
+                  Math.round(c.position.z / 1.02) * 1.02
+                );
+                const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
+                const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
+                c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+              }
+            }
+          }
+        }
+      };
+    })();
 
     function setSimMode(mode) {
       if (mode !== '2D' && mode !== '3D' && mode !== 'Off') {
@@ -434,18 +723,29 @@
 
       if (mode === 'Off') {
         wrap.style.visibility = 'hidden';
-        if (p) p.style.visibility = 'hidden';
+        if (p) p.style.display = 'none';
+        threeCube.hide();
         return;
       }
 
       wrap.style.visibility = 'visible';
-      if (p) {
-        p.style.visibility = 'visible';
-        const targetVis = mode === '3D' ? '3D' : '2D';
-        try { p.visualization = targetVis; } catch {}
-        try { p.setAttribute('visualization', targetVis); } catch {}
-        if (prevMode !== mode) {
-          syncPlayerMoves(p);
+      if (mode === '3D') {
+        if (p) p.style.display = 'none';
+        threeCube.show();
+        if (prevMode !== '3D') {
+          const applied = state.timerState === 'RUNNING'
+            ? state.moves.map(m => m.m)
+            : state.P.map(e => formatMove(e.f, e.q));
+          threeCube.applyMovesInstant(applied);
+        }
+      } else {
+        threeCube.hide();
+        if (p) {
+          p.style.display = 'block';
+          try { p.setAttribute('visualization', '2D'); } catch {}
+          if (prevMode !== '2D') {
+            syncPlayerMoves(p);
+          }
         }
       }
     }
@@ -703,9 +1003,13 @@
 
       const now = performance.now();
 
-      const p = player || document.getElementById('player');
-      if (p?.experimentalAddMove && state.simMode !== 'Off') {
-        try { p.experimentalAddMove(str); } catch {}
+      if (state.simMode === '3D') {
+        threeCube.addMove(str);
+      } else if (state.simMode === '2D') {
+        const p = player || document.getElementById('player');
+        if (p?.experimentalAddMove) {
+          try { p.experimentalAddMove(str); } catch {}
+        }
       }
 
       let isSolvedByModel = false;
@@ -917,7 +1221,7 @@
         await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
-            if (state.conn) await state.conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
+            if (state.conn) await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
           } catch (err) {
             console.error(err);
           }
