@@ -513,6 +513,8 @@
       sub: null,
       connecting: false,
       batteryTimer: null,
+      batteryPending: false,
+      batteryPendingTimer: null,
       dnfTimer: null,
       faceletsDebounce: null,
       faceletsPending: false,
@@ -527,6 +529,9 @@
       targetFacelets: SOLVED_FACELETS,
       cubeMoves: [],
       timerState: 'IDLE',
+      solveCompleting: false,
+      solveSeq: 0,
+      lastFinishedSeq: -1,
       startTime: 0,
       rafId: null,
       scrambles: [],
@@ -995,6 +1000,108 @@
     const crossDone = (f, C) => TOP_CUBIES[C].filter((_, i) => i % 2).every(([a, b]) => f[a] === C && f[b] === faceOf(b));
     const ollDone = (f, C) => { const T = OPP[C], b = FACE_L.indexOf(T) * 9; for (let k = 0; k < 9; k++) if (f[b + k] !== T) return false; return true; };
 
+    const F2L_SLOTS_BY_CROSS = (() => {
+      const corners = [
+        [0, 36, 47], [2, 45, 11], [8, 9, 20], [6, 18, 38],
+        [27, 44, 24], [29, 26, 15], [35, 17, 51], [33, 53, 42]
+      ];
+      const edges = [
+        [1, 46], [5, 10], [7, 19], [3, 37],
+        [28, 25], [32, 16], [34, 52], [30, 43],
+        [21, 41], [23, 12], [14, 48], [39, 50]
+      ];
+      const map = {};
+      for (const C of FACE_L) {
+        const T = OPP[C];
+        const slots = [];
+        for (const corner of corners) {
+          const cFaces = corner.map(faceOf);
+          if (!cFaces.includes(C) || cFaces.includes(T)) continue;
+          const adjFaces = cFaces.filter(x => x !== C).sort().join('');
+          const edge = edges.find(e => e.map(faceOf).sort().join('') === adjFaces);
+          if (!edge) continue;
+          const stickers = [...corner, ...edge];
+          const f0 = faceOf(edge[0]);
+          const f1 = faceOf(edge[1]);
+          slots.push({
+            id: f0 + f1,
+            stickers,
+            check: f => stickers.every(i => f[i] === faceOf(i))
+          });
+        }
+        map[C] = slots;
+      }
+      return map;
+    })();
+
+    function analyzeF2lPairs(st, mv, C, crossEnd, f2lEnd) {
+      const slots = F2L_SLOTS_BY_CROSS[C];
+      if (!slots || slots.length !== 4 || crossEnd < 0 || f2lEnd < crossEnd) {
+        return [null, null, null, null];
+      }
+
+      // Compute final stable completion move index for each of the 4 slots within [crossEnd, f2lEnd]
+      const slotInfo = slots.map((slot, sIdx) => {
+        const preSolved = slot.check(st[crossEnd]);
+        let completedAt = -1;
+        if (slot.check(st[f2lEnd])) {
+          let k = f2lEnd;
+          while (k > crossEnd && slot.check(st[k - 1])) {
+            k--;
+          }
+          completedAt = k;
+        }
+        return {
+          sIdx,
+          slot,
+          preSolved,
+          completedAt
+        };
+      });
+
+      // Verify all 4 slots are solved at f2lEnd
+      if (slotInfo.some(info => info.completedAt < 0)) {
+        return [null, null, null, null];
+      }
+
+      // Sort slots into actual chronological completion order
+      // Pre-solved slots (completedAt === crossEnd) come first, then ascending completedAt
+      const ordered = slotInfo.slice().sort((a, b) => {
+        if (a.completedAt !== b.completedAt) return a.completedAt - b.completedAt;
+        return a.sIdx - b.sIdx;
+      });
+
+      let prevEnd = crossEnd;
+      return ordered.map((info) => {
+        const end = info.completedAt;
+        if (end <= prevEnd) {
+          return {
+            slot: info.slot.id,
+            done: true,
+            skipped: true,
+            moves: 0,
+            ms: 0,
+            tps: 0
+          };
+        }
+        const segMoves = mv.slice(prevEnd, end);
+        const moves = computeMoveCount(segMoves);
+        const startTs = prevEnd > 0 ? mv[prevEnd - 1].t : 0;
+        const endTs = mv[end - 1].t;
+        const ms = Math.max(0, endTs - startTs);
+        const tps = ms > 0 ? parseFloat((moves / (ms / 1000)).toFixed(2)) : 0;
+        prevEnd = end;
+        return {
+          slot: info.slot.id,
+          done: true,
+          skipped: false,
+          moves,
+          ms,
+          tps
+        };
+      });
+    }
+
     function analyzeCfop(solve) {
       const isFace = m => /^[URFDLB]/.test(m);
       let f = SOLVED_FACELETS;
@@ -1033,7 +1140,8 @@
         phases.push({ name, done: true, moves, ms, skipped: info[k].skipped ?? moves === 0, label: info[k].name || '' });
         prev = end;
       });
-      return { crossColor: CROSS_COLOR[C], phases };
+      const f2lPairs = analyzeF2lPairs(st, mv, C, cross, f2l);
+      return { crossColor: CROSS_COLOR[C], phases, f2lPairs };
     }
 
     function clearDnfTimer() {
@@ -1056,9 +1164,13 @@
     }
 
     window.markDnf = () => {
-      if (state.timerState !== 'RUNNING') return;
+      if (state.timerState !== 'RUNNING' || state.solveCompleting) return;
+      if (state.lastFinishedSeq === state.solveSeq) return;
+      state.solveCompleting = true;
+      state.lastFinishedSeq = state.solveSeq;
       cancelAnimationFrame(state.rafId);
       clearDnfTimer();
+      clearTimeout(state.faceletsDebounce);
       state.timerState = 'IDLE';
       document.body.classList.remove('solving');
 
@@ -1078,7 +1190,7 @@
         sub.textContent = 'DNF';
       }
 
-      state.solves.unshift({
+      const solveRecord = {
         id: Date.now(),
         time: parseFloat(sec),
         ms: totalMs,
@@ -1087,7 +1199,13 @@
         scramble: state.scramble,
         moves: state.moves,
         dnf: true
-      });
+      };
+      try {
+        const cfop = analyzeCfop(solveRecord);
+        if (cfop && cfop.f2lPairs) solveRecord.f2lPairs = cfop.f2lPairs;
+      } catch {}
+
+      state.solves.unshift(solveRecord);
       saveSolves();
       renderMainStats();
       renderSolvesList();
@@ -1095,11 +1213,34 @@
       nextScramble();
     };
 
-    function checkSolvedAndFinish(now) {
-      if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
-        finishSolve(now);
-        resetCube2D();
+    function isFaceletSequenceSolved(scrambleStr, movesList) {
+      let f = SOLVED_FACELETS;
+      const scrTokens = (scrambleStr || '').trim().split(/\s+/);
+      for (const tok of scrTokens) {
+        if (/^[URFDLB]/i.test(tok)) {
+          f = applyFaceletMove(f, tok);
+        }
       }
+      for (const item of movesList) {
+        const m = typeof item === 'string' ? item : item.m;
+        if (m && /^[URFDLB]/i.test(m)) {
+          f = applyFaceletMove(f, m);
+        }
+      }
+      return f === SOLVED_FACELETS;
+    }
+
+    function checkSolvedAndFinish(now) {
+      if (state.timerState !== 'RUNNING' || state.solveCompleting) return false;
+      if (state.lastFinishedSeq === state.solveSeq) return false;
+      const moveCount = computeMoveCount(state.moves);
+      if (moveCount < 3) return false;
+      const liveSolved = state.liveFacelets === SOLVED_FACELETS;
+      const seqSolved = isFaceletSequenceSolved(state.scramble, state.moves);
+      if (!liveSolved && !seqSolved) return false;
+      finishSolve(now);
+      resetCube2D();
+      return true;
     }
 
     function loadSolves() {
@@ -1250,6 +1391,8 @@
     }
 
     function armTimer() {
+      state.solveCompleting = false;
+      state.solveSeq++;
       state.timerState = 'ARMED';
       state.moves = [];
       const val = document.getElementById('timer-val');
@@ -1286,6 +1429,8 @@
 
       if (k === state.S.length && rest.length === 0) {
         state.trackingActive = false;
+        state.liveFacelets = state.targetFacelets;
+        scheduleNetRender();
         renderScramble();
         armTimer();
         state.P = [];
@@ -1357,6 +1502,7 @@
 
       try {
         if (/^[xyz]/i.test(str)) return;
+        if (state.solveCompleting) return;
 
         if (state.trackingActive && state.timerState === 'IDLE') {
           onScrambleMove(parseMove(str));
@@ -1383,7 +1529,7 @@
           const sub = document.getElementById('timer-sub');
           if (sub) sub.textContent = `${count} moves | ${curTps} TPS`;
 
-          if (isSolved && count >= 3) {
+          if (count >= 3 && (isSolved || isFaceletSequenceSolved(state.scramble, state.moves))) {
             checkSolvedAndFinish(now);
             return;
           }
@@ -1394,8 +1540,13 @@
     }
 
     function finishSolve(endTime) {
+      if (state.solveCompleting) return;
+      if (state.lastFinishedSeq === state.solveSeq) return;
+      state.solveCompleting = true;
+      state.lastFinishedSeq = state.solveSeq;
       cancelAnimationFrame(state.rafId);
       clearDnfTimer();
+      clearTimeout(state.faceletsDebounce);
       state.timerState = 'IDLE';
       document.body.classList.remove('solving');
 
@@ -1414,7 +1565,7 @@
         sub.textContent = `Completed! ${moveCount} moves | ${tps} TPS`;
       }
 
-      state.solves.unshift({
+      const solveRecord = {
         id: Date.now(),
         time: parseFloat(sec),
         ms: totalMs,
@@ -1423,7 +1574,13 @@
         scramble: state.scramble,
         moves: state.moves,
         dnf: false
-      });
+      };
+      try {
+        const cfop = analyzeCfop(solveRecord);
+        if (cfop && cfop.f2lPairs) solveRecord.f2lPairs = cfop.f2lPairs;
+      } catch {}
+
+      state.solves.unshift(solveRecord);
       saveSolves();
       renderMainStats();
       renderSolvesList();
@@ -1435,6 +1592,7 @@
       cancelAnimationFrame(state.rafId);
       clearDnfTimer();
       state.timerState = 'IDLE';
+      state.solveCompleting = false;
       document.body.classList.remove('solving');
       state.moves = [];
       state.P = [];
@@ -1498,8 +1656,35 @@
         clearInterval(state.batteryTimer);
         state.batteryTimer = null;
       }
+      if (state.batteryPendingTimer) {
+        clearTimeout(state.batteryPendingTimer);
+        state.batteryPendingTimer = null;
+      }
+      state.batteryPending = false;
       const bat = document.getElementById('battery-pill');
       if (bat) bat.textContent = 'Battery: —';
+    }
+
+    function requestBatteryOnce() {
+      if (!state.conn || state.batteryPending) return Promise.resolve();
+      state.batteryPending = true;
+      clearTimeout(state.batteryPendingTimer);
+      state.batteryPendingTimer = setTimeout(() => {
+        state.batteryPending = false;
+        state.batteryPendingTimer = null;
+      }, 10000);
+      return cubeCmd({ type: "REQUEST_BATTERY" });
+    }
+
+    function startBatteryPolling() {
+      if (state.batteryTimer) {
+        clearInterval(state.batteryTimer);
+        state.batteryTimer = null;
+      }
+      state.batteryTimer = setInterval(() => {
+        if (!state.conn) return;
+        requestBatteryOnce();
+      }, 30000);
     }
 
     window.handleStatusClick = () => {
@@ -1565,13 +1750,22 @@
                 scheduleNetRender();
                 dbg("resync adopted");
               }
-              if (state.timerState === 'RUNNING' && state.liveFacelets === SOLVED_FACELETS && state.moves.length >= 3) {
-                checkSolvedAndFinish(now);
+              if (state.timerState === 'RUNNING' && !state.solveCompleting && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
+                if (now - state.lastMoveAt >= 150 || state.liveFacelets === SOLVED_FACELETS) {
+                  state.liveFacelets = SOLVED_FACELETS;
+                  scheduleNetRender();
+                  checkSolvedAndFinish(now);
+                }
               }
             }
           } else if (ev.type === "BATTERY") {
+            state.batteryPending = false;
+            clearTimeout(state.batteryPendingTimer);
+            state.batteryPendingTimer = null;
             const bat = document.getElementById('battery-pill');
-            if (bat) bat.textContent = `Battery: ${ev.batteryLevel}%`;
+            if (bat && typeof ev.batteryLevel === 'number' && !Number.isNaN(ev.batteryLevel)) {
+              bat.textContent = `Battery: ${ev.batteryLevel}%`;
+            }
           } else if (ev.type === "DISCONNECT") {
             dbg("DISCONNECT");
             clearTimeout(state.faceletsDebounce);
@@ -1588,14 +1782,8 @@
         });
 
         await cubeCmd({ type: "REQUEST_FACELETS" });
-        await cubeCmd({ type: "REQUEST_BATTERY" });
-        state.batteryTimer = setInterval(async () => {
-          try {
-            if (state.conn) await cubeCmd({ type: "REQUEST_BATTERY" });
-          } catch (err) {
-            console.error(err);
-          }
-        }, 60000);
+        await requestBatteryOnce();
+        startBatteryPolling();
       } catch (err) {
         console.error(err);
         state.connecting = false;
@@ -1761,6 +1949,25 @@
       }
     });
 
+    function renderF2lPairsHtml(pairs) {
+      const list = Array.isArray(pairs) && pairs.length === 4 ? pairs : [null, null, null, null];
+      const rows = list.map((p, idx) => {
+        const label = `F2L ${idx + 1}`;
+        if (!p || !p.done) {
+          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;color:var(--sub);"><span>${label}</span><span>N/A</span><span>N/A</span><span>N/A</span></div>`;
+        }
+        if (p.skipped) {
+          const tStr = '0.00 s';
+          const tpsStr = '0.00 TPS';
+          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;font-family:ui-monospace,monospace;color:var(--sub);"><span>${label}</span><span>${tStr}</span><span>0 moves</span><span>${tpsStr}</span></div>`;
+        }
+        const tStr = `${(p.ms / 1000).toFixed(2)} s`;
+        const tpsVal = p.ms > 0 ? (p.moves / (p.ms / 1000)).toFixed(2) : '0.00';
+        return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;font-family:ui-monospace,monospace;"><span>${label}</span><span>${tStr}</span><span>${p.moves} moves</span><span>${tpsVal} TPS</span></div>`;
+      }).join('');
+      return `<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;"><div style="font-size:0.75rem;color:var(--sub);margin-bottom:6px;">F2L Pairs</div><div style="display:flex;flex-direction:column;gap:4px;">${rows}</div></div>`;
+    }
+
     function renderCfopHtml(s) {
       let res = null;
       try {
@@ -1771,6 +1978,11 @@
       if (!res || !res.phases) {
         return '<div style="font-size:0.78rem;color:var(--sub);">CFOP split unavailable</div>';
       }
+      if (res.f2lPairs && !Array.isArray(s.f2lPairs)) {
+        s.f2lPairs = res.f2lPairs;
+        saveSolves();
+      }
+      const pairsData = Array.isArray(s.f2lPairs) ? s.f2lPairs : res.f2lPairs;
       const rows = res.phases.map((p, i) => {
         const phaseTitle = i === 0 && p.done && !p.skipped ? `${p.name} (${res.crossColor})` : p.name;
         if (!p.done) {
@@ -1782,7 +1994,7 @@
         const tStr = `${(p.ms / 1000).toFixed(2)} s`;
         return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;font-family:ui-monospace,monospace;"><span>${phaseTitle}</span><span>${p.moves} moves</span><span>${tStr}</span><span>${p.label}</span></div>`;
       }).join('');
-      return `<div style="background:var(--bg);border-radius:8px;padding:8px 10px;"><div style="font-size:0.75rem;color:var(--sub);margin-bottom:6px;">CFOP</div><div style="display:flex;flex-direction:column;gap:4px;">${rows}</div></div>`;
+      return `<div style="background:var(--bg);border-radius:8px;padding:8px 10px;"><div style="font-size:0.75rem;color:var(--sub);margin-bottom:6px;">CFOP</div><div style="display:flex;flex-direction:column;gap:4px;">${rows}</div>${renderF2lPairsHtml(pairsData)}</div>`;
     }
 
     function refreshSolveDialog() {
@@ -1947,4 +2159,3 @@
   </script>
 </body>
 </html>
-```[cite: 11]
