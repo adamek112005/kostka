@@ -328,10 +328,14 @@
 
   <dialog id="solve-dialog" style="border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:20px;max-width:340px;margin:auto;">
     <div id="solve-dialog-info" style="font-weight:600;font-size:1rem;margin-bottom:10px;text-align:center;">Solve</div>
-    <div style="margin-bottom:14px;background:var(--bg);border-radius:8px;padding:8px 10px;">
-      <div style="font-size:0.75rem;color:var(--sub);margin-bottom:4px;">Scramble:</div>
+    <div style="margin-bottom:10px;background:var(--bg);border-radius:8px;padding:8px 10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <span style="font-size:0.75rem;color:var(--sub);">Scramble:</span>
+        <button id="btn-reuse-scramble" title="Use this scramble" onclick="reuseSelectedScramble()" style="padding:2px 8px;font-size:0.8rem;line-height:1.2;">↩</button>
+      </div>
       <div id="solve-dialog-scramble" style="font-family:ui-monospace,monospace;font-size:0.85rem;word-break:break-word;white-space:normal;">—</div>
     </div>
+    <div id="solve-dialog-cfop" style="margin-bottom:14px;"></div>
     <div style="display:flex;justify-content:center;gap:8px;margin-bottom:10px;">
       <button id="btn-toggle-plus2" onclick="toggleSelectedPlus2()">+2</button>
       <button id="btn-toggle-dnf" onclick="toggleSelectedDnf()">DNF</button>
@@ -386,7 +390,6 @@
     });
 
     import { randomScrambleForEvent } from "https://esm.sh/cubing@0.52.2/scramble";
-    import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
     import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
     import * as THREE from "https://esm.sh/three@0.170.0";
     import { RoundedBoxGeometry } from "https://esm.sh/three@0.170.0/examples/jsm/geometries/RoundedBoxGeometry.js";
@@ -505,14 +508,6 @@
       return next.join('');
     }
 
-    let kpuzzle = null;
-    let kstate = null;
-
-    puzzles["3x3x3"].kpuzzle().then(kp => {
-      kpuzzle = kp;
-      kstate = kp.defaultPattern();
-    }).catch(console.error);
-
     const state = {
       conn: null,
       sub: null,
@@ -520,6 +515,11 @@
       batteryTimer: null,
       dnfTimer: null,
       faceletsDebounce: null,
+      faceletsPending: false,
+      faceletsPendingTimer: null,
+      cmdChain: Promise.resolve(),
+      dbg: [],
+      dbgLastAt: 0,
       lastMoveAt: 0,
       selectedSolveId: null,
       simMode: '2D',
@@ -541,6 +541,21 @@
       solves: []
     };
 
+    function dbg(text) {
+      const now = Math.round(performance.now());
+      const dt = state.dbg.length ? (now - state.dbgLastAt) : 0;
+      state.dbgLastAt = now;
+      state.dbg.push(`+${dt} ${text}`);
+      if (state.dbg.length > 60) state.dbg.shift();
+    }
+
+    function cubeCmd(cmd) {
+      state.cmdChain = state.cmdChain
+        .then(() => (state.conn ? state.conn.sendCubeCommand(cmd) : null))
+        .catch(e => dbg('cmd error ' + e));
+      return state.cmdChain;
+    }
+
     let netRenderScheduled = false;
     function renderNet() {
       const src = state.simMode === 'Off' ? state.targetFacelets : state.liveFacelets;
@@ -559,7 +574,6 @@
     }
 
     function resetCube2D() {
-      if (kpuzzle) { kstate = kpuzzle.defaultPattern(); }
       threeCube.reset();
       state.cubeMoves = [];
       state.liveFacelets = SOLVED_FACELETS;
@@ -822,7 +836,7 @@
             beginNextTurn();
           }
           if (activeTurn) {
-            const speed = 14;
+            const speed = 14 * (1 + queue.length);
             const step = Math.sign(activeTurn.targetAngle) * speed * dt;
             const nextAngle = activeTurn.currentAngle + step;
             if (Math.abs(nextAngle) >= Math.abs(activeTurn.targetAngle)) {
@@ -938,6 +952,88 @@
         }
       }
       return count;
+    }
+
+    const FACE_L = 'URFDLB';
+    const OPP = { U: 'D', D: 'U', R: 'L', L: 'R', F: 'B', B: 'F' };
+    const CROSS_COLOR = { U: 'white', D: 'yellow', F: 'green', B: 'blue', R: 'red', L: 'orange' };
+    const TOP_CUBIES = {U:[[0,36,47],[1,46],[2,45,11],[5,10],[8,9,20],[7,19],[6,18,38],[3,37]],R:[[9,20,8],[10,5],[11,2,45],[14,48],[17,51,35],[16,32],[15,29,26],[12,23]],F:[[18,38,6],[19,7],[20,8,9],[23,12],[26,15,29],[25,28],[24,27,44],[21,41]],D:[[27,44,24],[28,25],[29,26,15],[32,16],[35,17,51],[34,52],[33,53,42],[30,43]],L:[[36,47,0],[37,3],[38,6,18],[41,21],[44,24,27],[43,30],[42,33,53],[39,50]],B:[[45,11,2],[46,1],[47,0,36],[50,39],[53,42,33],[52,34],[51,35,17],[48,14]]};
+    const OLL_SIG = {'11211121':1,'11112121':2,'01212121':3,'01111111':4,'00212120':5,'00111110':6,'00202121':7,'01111010':8,'01101011':9,'01202021':10,'01212020':11,'00101111':12,'00212021':13,'01101110':14,'01202120':15,'00111011':16,'01110121':17,'01012111':18,'01011121':19,'01010101':20,'10201020':21,'10102020':22,'00002010':23,'00001020':24,'00100020':25,'00101010':26,'00202020':27,'00000101':28,'01011020':29,'00102101':30,'00011120':31,'00001121':32,'00011021':33,'00112001':34,'00110120':35,'00100121':36,'00210110':37,'00200111':38,'00110021':39,'01100120':40,'00201101':41,'01012010':42,'00012110':43,'00002111':44,'00012011':45,'00211001':46,'11112020':47,'10112120':48,'10102121':49,'10202111':50,'10212011':51,'10112021':52,'10211120':53,'10201121':54,'10211021':55,'11201120':56,'00010001':57};
+    const PLL_SIG = {'01436527':'Aa','01632547':'Ab','03654721':'E','01276543':'F','01476325':'Ga','01652743':'Gb','03472165':'Gc','05276341':'Gd','05274163':'H','01256347':'Ja','01236745':'Jb','01674523':'Na','05634127':'Nb','03216547':'Ra','01432765':'Rb','01472563':'T','01274365':'Ua','01254763':'Ub','01654327':'V','01634725':'Y','03214765':'Z'};
+    const OLL_NICK = { 21: 'H', 22: 'Pi', 23: 'Headlights', 24: 'Chameleon', 25: 'Bowtie', 26: 'Anti-Sune', 27: 'Sune' };
+    const faceOf = i => FACE_L[Math.floor(i / 9)];
+    const minOver = (n, fn) => { let best = null; for (let a = 0; a < n; a++) { const s = fn(a); if (best === null || s < best) best = s; } return best; };
+    function ollDigits(f, T) {
+      const d = [];
+      for (const cub of TOP_CUBIES[T]) {
+        const j = cub.findIndex(i => f[i] === T);
+        if (j < 0) return null;
+        d.push(j);
+      }
+      return d;
+    }
+    const canonOll = d => minOver(4, a => d.map((_, i) => d[(i + 2 * a) % 8]).join(''));
+    function pllPerm(f, T) {
+      const key = (c, g) => c.slice(1).map(g).sort().join('');
+      const home = TOP_CUBIES[T].map(c => key(c, faceOf));
+      const p = [];
+      for (const c of TOP_CUBIES[T]) {
+        const h = home.indexOf(key(c, i => f[i]));
+        if (h < 0) return null;
+        p.push(h);
+      }
+      return p;
+    }
+    const canonPll = p => minOver(16, k => p.map((_, i) => (p[(i + 2 * (k >> 2)) % 8] + 2 * (k & 3)) % 8).join(''));
+    const F2L_IDX = {};
+    for (const T of FACE_L) {
+      const top = new Set(TOP_CUBIES[T].flat());
+      top.add(FACE_L.indexOf(T) * 9 + 4);
+      F2L_IDX[T] = [...Array(54).keys()].filter(i => !top.has(i));
+    }
+    const f2lDone = (f, C) => F2L_IDX[OPP[C]].every(i => f[i] === faceOf(i));
+    const crossDone = (f, C) => TOP_CUBIES[C].filter((_, i) => i % 2).every(([a, b]) => f[a] === C && f[b] === faceOf(b));
+    const ollDone = (f, C) => { const T = OPP[C], b = FACE_L.indexOf(T) * 9; for (let k = 0; k < 9; k++) if (f[b + k] !== T) return false; return true; };
+
+    function analyzeCfop(solve) {
+      const isFace = m => /^[URFDLB]/.test(m);
+      let f = SOLVED_FACELETS;
+      for (const t of (solve.scramble || '').trim().split(/\s+/)) if (isFace(t)) f = applyFaceletMove(f, t);
+      const mv = (solve.moves || []).filter(x => isFace(x.m));
+      const st = [f];
+      for (const x of mv) { f = applyFaceletMove(f, x.m); st.push(f); }
+      const n = mv.length;
+      const first = (pred, from = 0) => { for (let i = from; i <= n; i++) if (pred(st[i])) return i; return -1; };
+      let C = null, f2l = -1;
+      for (const c of FACE_L) {
+        const i = first(s => f2lDone(s, c));
+        if (i >= 0 && (f2l < 0 || i < f2l)) { f2l = i; C = c; }
+      }
+      if (C === null) return null;
+      const T = OPP[C];
+      const cross = first(s => crossDone(s, C));
+      const oll = first(s => f2lDone(s, C) && ollDone(s, C), f2l);
+      const pll = oll >= 0 ? first(s => s === SOLVED_FACELETS, oll) : -1;
+      const ollSig = canonOll(ollDigits(st[f2l], T));
+      const pllSig = oll >= 0 ? canonPll(pllPerm(st[oll], T)) : null;
+      const ollNum = OLL_SIG[ollSig];
+      const info = [
+        {},
+        {},
+        { skipped: ollSig === '00000000', name: ollNum ? 'OLL ' + ollNum + (OLL_NICK[ollNum] ? ' (' + OLL_NICK[ollNum] + ')' : '') : 'OLL ?' },
+        { skipped: pllSig === '01234567', name: pllSig ? (PLL_SIG[pllSig] ? PLL_SIG[pllSig] + ' perm' : 'PLL ?') : '' }
+      ];
+      const phases = [];
+      let prev = 0;
+      ['Cross', 'F2L', 'OLL', 'PLL'].forEach((name, k) => {
+        const end = [cross, f2l, oll, pll][k];
+        if (end < 0) { phases.push({ name, done: false }); return; }
+        const moves = computeMoveCount(mv.slice(prev, end));
+        const ms = end > prev ? mv[end - 1].t - (prev > 0 ? mv[prev - 1].t : 0) : 0;
+        phases.push({ name, done: true, moves, ms, skipped: info[k].skipped ?? moves === 0, label: info[k].name || '' });
+        prev = end;
+      });
+      return { crossColor: CROSS_COLOR[C], phases };
     }
 
     function clearDnfTimer() {
@@ -1089,6 +1185,21 @@
       return { k, rest, isPartial, isWrong };
     }
 
+    function computeUndo(k, rest) {
+      const out = [];
+      for (let idx = rest.length - 1; idx >= 0; idx--) {
+        const g = rest[idx];
+        const next = idx === 0 && k < state.S.length && g.axis === state.S[k].axis ? state.S[k] : null;
+        for (const face of AXIS_FACES[g.axis]) {
+          const q = (g.q[face] || 0) % 4;
+          if (q === 0) continue;
+          if (next && (next.q[face] || 0) > 0) continue;
+          out.push(formatMove(face, (4 - q) % 4));
+        }
+      }
+      return out;
+    }
+
     function renderScramble() {
       const box = document.getElementById('scramble-text');
       if (!box) return;
@@ -1108,28 +1219,7 @@
 
       let undoHtml = '';
       if (isWrong) {
-        const undoMoves = [];
-        for (let idx = rest.length - 1; idx >= 0; idx--) {
-          const g = rest[idx];
-          const [f0, f1] = AXIS_FACES[g.axis];
-          if (idx === 0 && k < state.S.length && g.axis === state.S[k].axis) {
-            for (const face of [f0, f1]) {
-              const have = (g.q[face] || 0) % 4;
-              const want = (state.S[k].q[face] || 0) % 4;
-              const d = (have - want + 4) % 4;
-              if (d !== 0) {
-                undoMoves.push(formatMove(face, (4 - d) % 4));
-              }
-            }
-          } else {
-            for (const face of [f0, f1]) {
-              const q = (g.q[face] || 0) % 4;
-              if (q > 0) {
-                undoMoves.push(formatMove(face, (4 - q) % 4));
-              }
-            }
-          }
-        }
+        const undoMoves = computeUndo(k, rest);
         if (undoMoves.length) {
           undoHtml = `<div style="color:#ef4444;font-weight:700;margin-bottom:6px;">Undo: ${undoMoves.join(' ')}</div>`;
         }
@@ -1250,56 +1340,56 @@
       const now = performance.now();
       state.lastMoveAt = now;
 
-      if (state.simMode === '3D') {
-        threeCube.addMove(str);
-      }
-
+      let isSolved = false;
       if (!/^[xyz]/i.test(str)) {
         state.liveFacelets = applyFaceletMove(state.liveFacelets, str);
+        isSolved = state.liveFacelets === SOLVED_FACELETS;
         scheduleNetRender();
       }
 
-      let isSolvedByModel = false;
-      if (kpuzzle && kstate) {
-        try {
-          kstate = kstate.applyMove(str);
-          isSolvedByModel = kstate.experimentalIsSolved({ ignorePuzzleOrientation: true, ignoreCenterOrientation: true });
-        } catch (e) {
-          console.error(e);
+      try {
+        if (state.simMode === '3D') {
+          threeCube.addMove(str);
         }
+      } catch (e) {
+        console.error(e);
       }
 
-      if (/^[xyz]/i.test(str)) return;
+      try {
+        if (/^[xyz]/i.test(str)) return;
 
-      if (state.trackingActive && state.timerState === 'IDLE') {
-        onScrambleMove(parseMove(str));
-        return;
-      }
-
-      if (state.timerState === 'ARMED') {
-        state.timerState = 'RUNNING';
-        state.startTime = now;
-        state.moves = [{ m: str, t: 0 }];
-        const val = document.getElementById('timer-val');
-        if (val) {
-          val.className = 'timer running';
-          val.textContent = '0.00';
-        }
-        document.body.classList.add('solving');
-        startDnfTimer();
-        state.rafId = requestAnimationFrame(updateTimerDisplay);
-      } else if (state.timerState === 'RUNNING') {
-        startDnfTimer();
-        state.moves.push({ m: str, t: Math.round(now - state.startTime) });
-        const count = computeMoveCount(state.moves);
-        const curTps = (count / ((now - state.startTime) / 1000)).toFixed(2);
-        const sub = document.getElementById('timer-sub');
-        if (sub) sub.textContent = `${count} moves | ${curTps} TPS`;
-
-        if (isSolvedByModel && count >= 3) {
-          checkSolvedAndFinish(now);
+        if (state.trackingActive && state.timerState === 'IDLE') {
+          onScrambleMove(parseMove(str));
           return;
         }
+
+        if (state.timerState === 'ARMED') {
+          state.timerState = 'RUNNING';
+          state.startTime = now;
+          state.moves = [{ m: str, t: 0 }];
+          const val = document.getElementById('timer-val');
+          if (val) {
+            val.className = 'timer running';
+            val.textContent = '0.00';
+          }
+          document.body.classList.add('solving');
+          startDnfTimer();
+          state.rafId = requestAnimationFrame(updateTimerDisplay);
+        } else if (state.timerState === 'RUNNING') {
+          startDnfTimer();
+          state.moves.push({ m: str, t: Math.round(now - state.startTime) });
+          const count = computeMoveCount(state.moves);
+          const curTps = (count / ((now - state.startTime) / 1000)).toFixed(2);
+          const sub = document.getElementById('timer-sub');
+          if (sub) sub.textContent = `${count} moves | ${curTps} TPS`;
+
+          if (isSolved && count >= 3) {
+            checkSolvedAndFinish(now);
+            return;
+          }
+        }
+      } catch (e) {
+        console.error(e);
       }
     }
 
@@ -1450,28 +1540,43 @@
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
+            dbg("MOVE " + ev.move + " serial " + ev.serial);
             handleMove(ev.move);
             clearTimeout(state.faceletsDebounce);
             state.faceletsDebounce = setTimeout(() => {
-              if (state.conn) {
-                try { state.conn.sendCubeCommand({ type: "REQUEST_FACELETS" }); } catch {}
+              if (state.conn && !state.faceletsPending) {
+                state.faceletsPending = true;
+                clearTimeout(state.faceletsPendingTimer);
+                state.faceletsPendingTimer = setTimeout(() => {
+                  state.faceletsPending = false;
+                }, 1500);
+                cubeCmd({ type: "REQUEST_FACELETS" });
               }
-            }, 300);
+            }, 250);
           } else if (ev.type === "FACELETS") {
+            state.faceletsPending = false;
+            clearTimeout(state.faceletsPendingTimer);
             if (typeof ev.facelets === 'string' && ev.facelets.length === 54) {
-              if (performance.now() - state.lastMoveAt >= 200) {
+              const matched = ev.facelets === state.liveFacelets;
+              dbg(matched ? "FACELETS match" : "FACELETS differ");
+              const now = performance.now();
+              if (now - state.lastMoveAt >= 150 && !matched) {
                 state.liveFacelets = ev.facelets;
                 scheduleNetRender();
+                dbg("resync adopted");
               }
-              if (ev.facelets === SOLVED_FACELETS && state.timerState === 'RUNNING' && state.moves.length >= 3) {
-                checkSolvedAndFinish(performance.now());
+              if (state.timerState === 'RUNNING' && state.liveFacelets === SOLVED_FACELETS && state.moves.length >= 3) {
+                checkSolvedAndFinish(now);
               }
             }
           } else if (ev.type === "BATTERY") {
             const bat = document.getElementById('battery-pill');
             if (bat) bat.textContent = `Battery: ${ev.batteryLevel}%`;
           } else if (ev.type === "DISCONNECT") {
+            dbg("DISCONNECT");
             clearTimeout(state.faceletsDebounce);
+            clearTimeout(state.faceletsPendingTimer);
+            state.faceletsPending = false;
             clearBattery();
             if (state.sub) {
               try { state.sub.unsubscribe(); } catch {}
@@ -1482,11 +1587,11 @@
           }
         });
 
-        await conn.sendCubeCommand({ type: "REQUEST_FACELETS" });
-        await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
+        await cubeCmd({ type: "REQUEST_FACELETS" });
+        await cubeCmd({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
-            if (state.conn) await state.conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
+            if (state.conn) await cubeCmd({ type: "REQUEST_BATTERY" });
           } catch (err) {
             console.error(err);
           }
@@ -1656,6 +1761,30 @@
       }
     });
 
+    function renderCfopHtml(s) {
+      let res = null;
+      try {
+        res = analyzeCfop(s);
+      } catch {
+        return '<div style="font-size:0.78rem;color:var(--sub);">CFOP split unavailable</div>';
+      }
+      if (!res || !res.phases) {
+        return '<div style="font-size:0.78rem;color:var(--sub);">CFOP split unavailable</div>';
+      }
+      const rows = res.phases.map((p, i) => {
+        const phaseTitle = i === 0 && p.done && !p.skipped ? `${p.name} (${res.crossColor})` : p.name;
+        if (!p.done) {
+          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;color:var(--sub);"><span>${phaseTitle}</span><span>—</span><span>—</span><span></span></div>`;
+        }
+        if (p.skipped) {
+          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;"><span style="color:var(--sub);">${phaseTitle}</span><span style="color:var(--sub);">skipped</span><span></span><span></span></div>`;
+        }
+        const tStr = `${(p.ms / 1000).toFixed(2)} s`;
+        return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;font-family:ui-monospace,monospace;"><span>${phaseTitle}</span><span>${p.moves} moves</span><span>${tStr}</span><span>${p.label}</span></div>`;
+      }).join('');
+      return `<div style="background:var(--bg);border-radius:8px;padding:8px 10px;"><div style="font-size:0.75rem;color:var(--sub);margin-bottom:6px;">CFOP</div><div style="display:flex;flex-direction:column;gap:4px;">${rows}</div></div>`;
+    }
+
     function refreshSolveDialog() {
       if (state.selectedSolveId == null) return;
       const s = state.solves.find(x => x.id === state.selectedSolveId);
@@ -1667,11 +1796,24 @@
       if (infoEl) infoEl.textContent = `#${seq}: ${formatSolveTime(s)} (${s.count} moves, ${s.tps} TPS)`;
       const scrEl = document.getElementById('solve-dialog-scramble');
       if (scrEl) scrEl.textContent = s.scramble || '—';
+      const reuseBtn = document.getElementById('btn-reuse-scramble');
+      if (reuseBtn) reuseBtn.style.display = s.scramble ? 'inline-block' : 'none';
+      const cfopEl = document.getElementById('solve-dialog-cfop');
+      if (cfopEl) cfopEl.innerHTML = renderCfopHtml(s);
       const p2Btn = document.getElementById('btn-toggle-plus2');
       if (p2Btn) p2Btn.classList.toggle('primary', Boolean(s.plus2));
       const dnfBtn = document.getElementById('btn-toggle-dnf');
       if (dnfBtn) dnfBtn.classList.toggle('primary', Boolean(s.dnf));
     }
+
+    window.reuseSelectedScramble = () => {
+      if (state.selectedSolveId == null || state.timerState === 'RUNNING') return;
+      const s = state.solves.find(x => x.id === state.selectedSolveId);
+      if (!s || !s.scramble) return;
+      closeSolveDialog();
+      state.scrambles.push(s.scramble);
+      loadScrambleIndex(state.scrambles.length - 1);
+    };
 
     window.toggleSelectedPlus2 = () => {
       if (state.selectedSolveId == null) return;
@@ -1762,6 +1904,42 @@
       console.error(e);
     }
     setSimMode(initialSimMode);
+    (() => {
+      const bat = document.getElementById('battery-pill');
+      if (!bat) return;
+      let taps = [];
+      let dlg = null;
+      bat.style.cursor = 'pointer';
+      bat.style.userSelect = 'none';
+      bat.addEventListener('click', () => {
+        const now = Date.now();
+        taps = taps.filter(t => now - t <= 3000);
+        taps.push(now);
+        if (taps.length < 5) return;
+        taps = [];
+        if (!dlg) {
+          dlg = document.createElement('dialog');
+          dlg.style.cssText = 'border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:16px;max-width:420px;width:92vw;margin:auto;';
+          const pre = document.createElement('pre');
+          pre.style.cssText = 'font-family:ui-monospace,monospace;font-size:0.75rem;max-height:55vh;overflow:auto;background:var(--bg);padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-word;margin-bottom:12px;';
+          const bar = document.createElement('div');
+          bar.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+          const copyBtn = document.createElement('button');
+          copyBtn.textContent = 'Copy';
+          copyBtn.onclick = () => navigator.clipboard?.writeText(pre.textContent || '');
+          const closeBtn = document.createElement('button');
+          closeBtn.textContent = 'Close';
+          closeBtn.onclick = () => dlg.close();
+          bar.append(copyBtn, closeBtn);
+          dlg.append(pre, bar);
+          document.body.appendChild(dlg);
+        }
+        const pre = dlg.querySelector('pre');
+        if (pre) pre.textContent = state.dbg.join('\n') || '(empty)';
+        dlg.showModal();
+      });
+    })();
+
     state.solves = loadSolves();
     renderMainStats();
     renderSolvesList();
@@ -1769,3 +1947,4 @@
   </script>
 </body>
 </html>
+```[cite: 11]
