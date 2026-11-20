@@ -326,8 +326,16 @@
     </div>
   </dialog>
 
-  <dialog id="solve-dialog" style="border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:20px;max-width:320px;margin:auto;">
-    <div id="solve-dialog-info" style="font-weight:600;font-size:1rem;margin-bottom:16px;text-align:center;">Solve</div>
+  <dialog id="solve-dialog" style="border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:20px;max-width:340px;margin:auto;">
+    <div id="solve-dialog-info" style="font-weight:600;font-size:1rem;margin-bottom:10px;text-align:center;">Solve</div>
+    <div style="margin-bottom:14px;background:var(--bg);border-radius:8px;padding:8px 10px;">
+      <div style="font-size:0.75rem;color:var(--sub);margin-bottom:4px;">Scramble:</div>
+      <div id="solve-dialog-scramble" style="font-family:ui-monospace,monospace;font-size:0.85rem;word-break:break-word;white-space:normal;">—</div>
+    </div>
+    <div style="display:flex;justify-content:center;gap:8px;margin-bottom:10px;">
+      <button id="btn-toggle-plus2" onclick="toggleSelectedPlus2()">+2</button>
+      <button id="btn-toggle-dnf" onclick="toggleSelectedDnf()">DNF</button>
+    </div>
     <div style="display:flex;justify-content:center;gap:8px;">
       <button class="danger" onclick="deleteSelectedSolve()">Delete</button>
       <button onclick="copySelectedSolveMoves()">Copy moves</button>
@@ -517,6 +525,7 @@
       simMode: '2D',
       liveFacelets: SOLVED_FACELETS,
       targetFacelets: SOLVED_FACELETS,
+      cubeMoves: [],
       timerState: 'IDLE',
       startTime: 0,
       rafId: null,
@@ -524,6 +533,7 @@
       scrambleIndex: -1,
       scramble: '',
       rawTokens: [],
+      tokenGroup: [],
       S: [],
       P: [],
       trackingActive: false,
@@ -551,6 +561,7 @@
     function resetCube2D() {
       if (kpuzzle) { kstate = kpuzzle.defaultPattern(); }
       threeCube.reset();
+      state.cubeMoves = [];
       state.liveFacelets = SOLVED_FACELETS;
       scheduleNetRender();
     }
@@ -899,12 +910,7 @@
       if (mode === '3D') {
         if (net) net.style.display = 'none';
         threeCube.show();
-        if (prevMode !== '3D') {
-          const applied = state.timerState === 'RUNNING'
-            ? state.moves.map(m => m.m)
-            : state.P.map(e => formatMove(e.f, e.q));
-          threeCube.applyMovesInstant(applied);
-        }
+        threeCube.applyMovesInstant(state.cubeMoves);
       } else {
         threeCube.hide();
         if (net) net.style.display = 'block';
@@ -1045,20 +1051,49 @@
       return '';
     }
 
+    const AXIS_FACES = [['U', 'D'], ['R', 'L'], ['F', 'B']];
+    function axisOfFace(f) {
+      if (f === 'U' || f === 'D') return 0;
+      if (f === 'R' || f === 'L') return 1;
+      if (f === 'F' || f === 'B') return 2;
+      return -1;
+    }
+    function makeGroup(axis) {
+      const [a, b] = AXIS_FACES[axis];
+      return { axis, q: { [a]: 0, [b]: 0 } };
+    }
+    function isZeroGroup(g) {
+      const [a, b] = AXIS_FACES[g.axis];
+      return (g.q[a] % 4) === 0 && (g.q[b] % 4) === 0;
+    }
+    function sameGroup(a, b) {
+      if (!a || !b || a.axis !== b.axis) return false;
+      const [f0, f1] = AXIS_FACES[a.axis];
+      return ((a.q[f0] || 0) % 4) === ((b.q[f0] || 0) % 4) &&
+             ((a.q[f1] || 0) % 4) === ((b.q[f1] || 0) % 4);
+    }
+    function evalScrambleMatch() {
+      let k = 0;
+      while (k < state.P.length && k < state.S.length && sameGroup(state.P[k], state.S[k])) {
+        k++;
+      }
+      const rest = state.P.slice(k);
+      let isPartial = false;
+      if (rest.length === 1 && k < state.S.length && rest[0].axis === state.S[k].axis) {
+        const [f0, f1] = AXIS_FACES[rest[0].axis];
+        const ok0 = (rest[0].q[f0] || 0) === 0 || (state.S[k].q[f0] || 0) > 0;
+        const ok1 = (rest[0].q[f1] || 0) === 0 || (state.S[k].q[f1] || 0) > 0;
+        isPartial = ok0 && ok1;
+      }
+      const isWrong = !isPartial && rest.length > 0;
+      return { k, rest, isPartial, isWrong };
+    }
+
     function renderScramble() {
       const box = document.getElementById('scramble-text');
       if (!box) return;
 
-      let k = 0;
-      while (k < state.P.length && k < state.S.length &&
-             state.P[k].f === state.S[k].f && state.P[k].q === state.S[k].q) {
-        k++;
-      }
-      const rest = state.P.slice(k);
-      const isPartial = rest.length === 1 &&
-        k < state.S.length &&
-        rest[0].f === state.S[k].f;
-      const isWrong = !isPartial && rest.length > 0;
+      const { k, rest, isPartial, isWrong } = evalScrambleMatch();
 
       if (isWrong) {
         box.style.borderColor = '#ef4444';
@@ -1073,19 +1108,49 @@
 
       let undoHtml = '';
       if (isWrong) {
-        const undoMoves = rest.slice().reverse().map(e => formatMove(e.f, (4 - e.q) % 4)).join(' ');
-        undoHtml = `<div style="color:#ef4444;font-weight:700;margin-bottom:6px;">Undo: ${undoMoves}</div>`;
+        const undoMoves = [];
+        for (let idx = rest.length - 1; idx >= 0; idx--) {
+          const g = rest[idx];
+          const [f0, f1] = AXIS_FACES[g.axis];
+          if (idx === 0 && k < state.S.length && g.axis === state.S[k].axis) {
+            for (const face of [f0, f1]) {
+              const have = (g.q[face] || 0) % 4;
+              const want = (state.S[k].q[face] || 0) % 4;
+              const d = (have - want + 4) % 4;
+              if (d !== 0) {
+                undoMoves.push(formatMove(face, (4 - d) % 4));
+              }
+            }
+          } else {
+            for (const face of [f0, f1]) {
+              const q = (g.q[face] || 0) % 4;
+              if (q > 0) {
+                undoMoves.push(formatMove(face, (4 - q) % 4));
+              }
+            }
+          }
+        }
+        if (undoMoves.length) {
+          undoHtml = `<div style="color:#ef4444;font-weight:700;margin-bottom:6px;">Undo: ${undoMoves.join(' ')}</div>`;
+        }
       }
 
+      const curRest0 = rest.length === 1 ? rest[0] : null;
       const tokensHtml = state.rawTokens.map((tok, idx) => {
-        if (idx < k) {
+        const gIdx = state.tokenGroup[idx];
+        const parsed = parseMove(tok);
+        if (gIdx < k) {
           return `<span style="opacity:0.3;text-decoration:line-through;">${tok}</span>`;
-        } else if (idx === k) {
-          if (isPartial) {
-            return `<span style="color:#eab308;font-weight:700;">${tok}</span>`;
-          } else {
-            return `<span style="font-weight:700;text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:4px;">${tok}</span>`;
+        } else if (gIdx === k) {
+          const wantQ = (state.S[k]?.q[parsed.f] || 0) % 4;
+          const haveQ = (curRest0 && curRest0.axis === state.S[k]?.axis) ? ((curRest0.q[parsed.f] || 0) % 4) : 0;
+          if (wantQ > 0 && haveQ === wantQ) {
+            return `<span style="opacity:0.3;text-decoration:line-through;">${tok}</span>`;
           }
+          if (isPartial && haveQ !== 0) {
+            return `<span style="color:#eab308;font-weight:700;">${tok}</span>`;
+          }
+          return `<span style="font-weight:700;text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:4px;">${tok}</span>`;
         } else {
           return `<span>${tok}</span>`;
         }
@@ -1108,27 +1173,26 @@
     }
 
     function applyMoveToP(m) {
-      if (state.P.length > 0 && state.P[state.P.length - 1].f === m.f) {
-        const q = (state.P[state.P.length - 1].q + m.q) % 4;
-        if (q === 0) {
+      const ax = axisOfFace(m.f);
+      if (ax < 0) return;
+      const last = state.P[state.P.length - 1];
+      if (last && last.axis === ax) {
+        last.q[m.f] = ((last.q[m.f] || 0) + m.q) % 4;
+        if (isZeroGroup(last)) {
           state.P.pop();
-        } else {
-          state.P[state.P.length - 1] = { f: m.f, q };
         }
       } else {
-        state.P.push({ f: m.f, q: m.q });
+        const g = makeGroup(ax);
+        g.q[m.f] = m.q % 4;
+        if (!isZeroGroup(g)) {
+          state.P.push(g);
+        }
       }
     }
 
     function onScrambleMove(m) {
       applyMoveToP(m);
-
-      let k = 0;
-      while (k < state.P.length && k < state.S.length &&
-             state.P[k].f === state.S[k].f && state.P[k].q === state.S[k].q) {
-        k++;
-      }
-      const rest = state.P.slice(k);
+      const { k, rest } = evalScrambleMatch();
 
       if (k === state.S.length && rest.length === 0) {
         state.trackingActive = false;
@@ -1144,7 +1208,22 @@
     function setScramble(str) {
       state.scramble = str;
       state.rawTokens = str.trim().split(/\s+/).filter(tok => /^[URFDLB]/i.test(tok));
-      state.S = state.rawTokens.map(parseMove);
+      state.S = [];
+      state.tokenGroup = [];
+      for (const tok of state.rawTokens) {
+        const m = parseMove(tok);
+        const ax = axisOfFace(m.f);
+        const last = state.S[state.S.length - 1];
+        if (last && last.axis === ax) {
+          last.q[m.f] = ((last.q[m.f] || 0) + m.q) % 4;
+          state.tokenGroup.push(state.S.length - 1);
+        } else {
+          const g = makeGroup(ax);
+          g.q[m.f] = m.q % 4;
+          state.S.push(g);
+          state.tokenGroup.push(state.S.length - 1);
+        }
+      }
       state.P = [];
       state.trackingActive = true;
       let target = SOLVED_FACELETS;
@@ -1166,6 +1245,7 @@
     function handleMove(move) {
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
+      state.cubeMoves.push(str);
 
       const now = performance.now();
       state.lastMoveAt = now;
@@ -1419,9 +1499,18 @@
       }
     }
 
+    function effTime(s) {
+      return s.time + (s.plus2 ? 2 : 0);
+    }
+    function formatSolveTime(s) {
+      if (s.dnf) return 'DNF';
+      if (s.plus2) return effTime(s).toFixed(2) + '+';
+      return s.time.toFixed(2);
+    }
+
     function calcTrimmedMean(arr, n) {
       if (arr.length < n) return '—';
-      const s = arr.slice(0, n).map(x => x.time).sort((a, b) => a - b).slice(1, n - 1);
+      const s = arr.slice(0, n).map(effTime).sort((a, b) => a - b).slice(1, n - 1);
       return (s.reduce((a, b) => a + b, 0) / s.length).toFixed(2);
     }
 
@@ -1429,7 +1518,7 @@
       if (arr.length < n) return '—';
       let best = Infinity;
       for (let i = 0; i <= arr.length - n; i++) {
-        const s = arr.slice(i, i + n).map(x => x.time).sort((a, b) => a - b).slice(1, n - 1);
+        const s = arr.slice(i, i + n).map(effTime).sort((a, b) => a - b).slice(1, n - 1);
         const avg = s.reduce((a, b) => a + b, 0) / s.length;
         if (avg < best) best = avg;
       }
@@ -1464,7 +1553,7 @@
         if (ao100El) ao100El.textContent = '—';
         return;
       }
-      const times = valid.map(x => x.time);
+      const times = valid.map(effTime);
       if (bestEl) bestEl.textContent = Math.min(...times).toFixed(2);
       if (ao5El) ao5El.textContent = calcTrimmedMean(valid, 5);
       if (ao50El) ao50El.textContent = calcTrimmedMean(valid, 50);
@@ -1482,7 +1571,7 @@
       const slice = state.solves.slice(0, 100);
       container.innerHTML = slice.map((s, i) => {
         const seq = total - i;
-        const timeDisplay = s.dnf ? 'DNF' : s.time.toFixed(2) + 's';
+        const timeDisplay = formatSolveTime(s);
         const timeStyle = s.dnf ? 'color:var(--danger);font-weight:700;' : 'font-weight:700;';
         return `
           <div class="solve-row" onclick="openSolveDialog(${s.id})">
@@ -1500,7 +1589,7 @@
       if (!d || !d.open) return;
 
       const list = state.solves.filter(s => !s.dnf);
-      const times = list.map(x => x.time);
+      const times = list.map(effTime);
       const count = list.length;
 
       document.getElementById('dt-count').textContent = count;
@@ -1532,11 +1621,11 @@
         svg.innerHTML = '';
       } else {
         const rev = list.slice(0, 50).reverse();
-        const tRev = rev.map(x => x.time);
+        const tRev = rev.map(effTime);
         const min = Math.min(...tRev), max = Math.max(...tRev), rng = (max - min) || 1;
         const pts = rev.map((x, i) => {
           const px = 10 + (i / (rev.length - 1)) * 280;
-          const py = 42 - ((x.time - min) / rng) * 34;
+          const py = 42 - ((effTime(x) - min) / rng) * 34;
           return `${px.toFixed(1)},${py.toFixed(1)}`;
         }).join(' ');
         svg.innerHTML = `<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${pts}" />`;
@@ -1567,16 +1656,54 @@
       }
     });
 
-    window.openSolveDialog = (id) => {
-      state.selectedSolveId = id;
-      const s = state.solves.find(x => x.id === id);
+    function refreshSolveDialog() {
+      if (state.selectedSolveId == null) return;
+      const s = state.solves.find(x => x.id === state.selectedSolveId);
       if (!s) return;
       const total = state.solves.length;
       const idx = state.solves.indexOf(s);
       const seq = total - idx;
-      const title = `#${seq}: ${s.dnf ? 'DNF' : s.time.toFixed(2) + 's'} (${s.count} moves, ${s.tps} TPS)`;
       const infoEl = document.getElementById('solve-dialog-info');
-      if (infoEl) infoEl.textContent = title;
+      if (infoEl) infoEl.textContent = `#${seq}: ${formatSolveTime(s)} (${s.count} moves, ${s.tps} TPS)`;
+      const scrEl = document.getElementById('solve-dialog-scramble');
+      if (scrEl) scrEl.textContent = s.scramble || '—';
+      const p2Btn = document.getElementById('btn-toggle-plus2');
+      if (p2Btn) p2Btn.classList.toggle('primary', Boolean(s.plus2));
+      const dnfBtn = document.getElementById('btn-toggle-dnf');
+      if (dnfBtn) dnfBtn.classList.toggle('primary', Boolean(s.dnf));
+    }
+
+    window.toggleSelectedPlus2 = () => {
+      if (state.selectedSolveId == null) return;
+      const s = state.solves.find(x => x.id === state.selectedSolveId);
+      if (!s) return;
+      s.plus2 = !s.plus2;
+      if (s.plus2) s.dnf = false;
+      saveSolves();
+      renderMainStats();
+      renderSolvesList();
+      renderDetailedStats();
+      refreshSolveDialog();
+    };
+
+    window.toggleSelectedDnf = () => {
+      if (state.selectedSolveId == null) return;
+      const s = state.solves.find(x => x.id === state.selectedSolveId);
+      if (!s) return;
+      s.dnf = !s.dnf;
+      if (s.dnf) s.plus2 = false;
+      saveSolves();
+      renderMainStats();
+      renderSolvesList();
+      renderDetailedStats();
+      refreshSolveDialog();
+    };
+
+    window.openSolveDialog = (id) => {
+      state.selectedSolveId = id;
+      const s = state.solves.find(x => x.id === id);
+      if (!s) return;
+      refreshSolveDialog();
       const d = document.getElementById('solve-dialog');
       if (d) d.showModal();
     };
@@ -1611,7 +1738,7 @@
       const rows = state.solves.map((s, i) => {
         const movesLog = (s.moves || []).map(m => `${m.m}@${m.t}`).join(' ');
         const status = s.dnf ? 'DNF' : 'OK';
-        const timeVal = s.dnf ? 'DNF' : s.time;
+        const timeVal = s.dnf ? 'DNF' : effTime(s).toFixed(2);
         return `${state.solves.length - i},${timeVal},${s.count},${s.tps},${status},"${s.scramble}","${movesLog}"`;
       }).join('\n');
       const blob = new Blob([head + rows], { type: 'text/csv;charset=utf-8;' });
