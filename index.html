@@ -85,11 +85,42 @@
       letter-spacing: 0.5px;
       line-height: 1.4;
     }
-    .scramble-controls { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .scramble-controls > button { min-width: 48px; font-weight: 600; }
-    .seg-ctrl { display: inline-flex; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 2px; gap: 2px; }
-    .seg-btn { min-width: 0 !important; padding: 6px 10px !important; font-size: 0.8rem !important; font-weight: 600 !important; border: none !important; background: transparent !important; color: var(--sub) !important; border-radius: 6px !important; cursor: pointer; line-height: 1; }
-    .seg-btn.active { background: var(--accent) !important; color: #fff !important; }
+    .scramble-controls {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+    }
+    .ctrl-left {
+      display: flex;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 6px;
+    }
+    .ctrl-center {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .ctrl-right {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+    }
+    .scramble-controls button { min-width: 44px; font-weight: 600; }
+    .sim-select {
+      font-family: inherit;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      outline: none;
+    }
     .player-wrap {
       width: 100%;
       height: 185px;
@@ -243,13 +274,19 @@
     <div id="scramble-text" class="scramble-box">Generating…</div>
 
     <div class="scramble-controls">
-      <button id="btn-prev-scramble" onclick="prevScramble()" disabled>←</button>
-      <button onclick="reset()">Reset</button>
-      <button id="btn-next-scramble" onclick="nextScramble()">→</button>
-      <div class="seg-ctrl" id="sim-switch">
-        <button type="button" class="seg-btn active" data-mode="2D" onclick="setSimMode('2D')">2D</button>
-        <button type="button" class="seg-btn" data-mode="3D" onclick="setSimMode('3D')">3D</button>
-        <button type="button" class="seg-btn" data-mode="Off" onclick="setSimMode('Off')">Off</button>
+      <div class="ctrl-left">
+        <button id="btn-prev-scramble" onclick="prevScramble()" disabled>←</button>
+        <button id="btn-next-scramble" onclick="nextScramble()">→</button>
+      </div>
+      <div class="ctrl-center">
+        <button onclick="reset()">Reset</button>
+      </div>
+      <div class="ctrl-right">
+        <select id="sim-select" class="sim-select" onchange="setSimMode(this.value)" aria-label="View mode">
+          <option value="2D">2D</option>
+          <option value="3D">3D</option>
+          <option value="Off">Off</option>
+        </select>
       </div>
     </div>
 
@@ -349,6 +386,7 @@
     import { puzzles } from "https://esm.sh/cubing@0.52.2/puzzles";
     import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
     import * as THREE from "https://esm.sh/three@0.170.0";
+    import { RoundedBoxGeometry } from "https://esm.sh/three@0.170.0/examples/jsm/geometries/RoundedBoxGeometry.js";
 
     let player = document.getElementById('player');
     let kpuzzle = null;
@@ -388,6 +426,27 @@
       return player;
     }
 
+    function ensureFresh2DPlayer() {
+      const wrap = document.querySelector('.player-wrap');
+      if (!wrap) return null;
+      const oldP = document.getElementById('player');
+      const fresh = document.createElement('twisty-player');
+      fresh.id = 'player';
+      fresh.setAttribute('puzzle', '3x3x3');
+      fresh.setAttribute('visualization', '2D');
+      fresh.setAttribute('control-panel', 'none');
+      fresh.setAttribute('background', 'none');
+      fresh.style.width = '100%';
+      fresh.style.height = '100%';
+      if (oldP) {
+        oldP.replaceWith(fresh);
+      } else {
+        wrap.prepend(fresh);
+      }
+      player = fresh;
+      return fresh;
+    }
+
     function syncPlayerMoves(p) {
       if (!p) return;
       try {
@@ -415,6 +474,7 @@
       } catch (e) { console.error(e); }
     }
 
+
     // --- Independent Three.js 3D Cube Preview ---
     const threeCube = (() => {
       let scene = null, camera = null, renderer = null, rootGroup = null;
@@ -434,21 +494,57 @@
         core: 0x0f172a
       };
 
+      function createStickerGeometry(size, radius) {
+        const s = size / 2 - radius;
+        const shape = new THREE.Shape();
+        shape.moveTo(-s, -s - radius);
+        shape.lineTo(s, -s - radius);
+        shape.quadraticCurveTo(s + radius, -s - radius, s + radius, -s);
+        shape.lineTo(s + radius, s);
+        shape.quadraticCurveTo(s + radius, s + radius, s, s + radius);
+        shape.lineTo(-s, s + radius);
+        shape.quadraticCurveTo(-s - radius, s + radius, -s - radius, s);
+        shape.lineTo(-s - radius, -s);
+        shape.quadraticCurveTo(-s - radius, -s - radius, -s, -s - radius);
+        return new THREE.ShapeGeometry(shape, 5);
+      }
+
+      const sharedBodyGeo = new RoundedBoxGeometry(0.985, 0.985, 0.985, 4, 0.11);
+      const sharedStickerGeo = createStickerGeometry(0.84, 0.075);
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color: 0x0b0f17,
+        roughness: 0.32,
+        metalness: 0.08
+      });
+
+      function addSticker(parent, colorHex, pos, rot) {
+        const mat = new THREE.MeshStandardMaterial({
+          color: colorHex,
+          roughness: 0.28,
+          metalness: 0.04
+        });
+        const sticker = new THREE.Mesh(sharedStickerGeo, mat);
+        sticker.position.set(pos[0], pos[1], pos[2]);
+        sticker.rotation.set(rot[0], rot[1], rot[2]);
+        parent.add(sticker);
+      }
+
       function createCubie(x, y, z) {
-        const size = 0.94;
-        const gap = 1.02;
-        const mats = [
-          new THREE.MeshStandardMaterial({ color: x === 1 ? COLORS.R : COLORS.core, roughness: 0.35, metalness: 0.05 }),
-          new THREE.MeshStandardMaterial({ color: x === -1 ? COLORS.L : COLORS.core, roughness: 0.35, metalness: 0.05 }),
-          new THREE.MeshStandardMaterial({ color: y === 1 ? COLORS.U : COLORS.core, roughness: 0.35, metalness: 0.05 }),
-          new THREE.MeshStandardMaterial({ color: y === -1 ? COLORS.D : COLORS.core, roughness: 0.35, metalness: 0.05 }),
-          new THREE.MeshStandardMaterial({ color: z === 1 ? COLORS.F : COLORS.core, roughness: 0.35, metalness: 0.05 }),
-          new THREE.MeshStandardMaterial({ color: z === -1 ? COLORS.B : COLORS.core, roughness: 0.35, metalness: 0.05 })
-        ];
-        const geo = new THREE.BoxGeometry(size, size, size);
-        const mesh = new THREE.Mesh(geo, mats);
-        mesh.position.set(x * gap, y * gap, z * gap);
-        return mesh;
+        const gap = 1.0;
+        const group = new THREE.Group();
+        const body = new THREE.Mesh(sharedBodyGeo, bodyMat);
+        group.add(body);
+
+        const offset = 0.495;
+        if (x === 1)  addSticker(group, COLORS.R, [offset, 0, 0], [0, Math.PI / 2, 0]);
+        if (x === -1) addSticker(group, COLORS.L, [-offset, 0, 0], [0, -Math.PI / 2, 0]);
+        if (y === 1)  addSticker(group, COLORS.U, [0, offset, 0], [-Math.PI / 2, 0, 0]);
+        if (y === -1) addSticker(group, COLORS.D, [0, -offset, 0], [Math.PI / 2, 0, 0]);
+        if (z === 1)  addSticker(group, COLORS.F, [0, 0, offset], [0, 0, 0]);
+        if (z === -1) addSticker(group, COLORS.B, [0, 0, -offset], [0, Math.PI, 0]);
+
+        group.position.set(x * gap, y * gap, z * gap);
+        return group;
       }
 
       function rebuildCubies() {
@@ -581,7 +677,7 @@
           if (spec.layer === null) {
             moving.push(c);
           } else {
-            const coord = Math.round(c.position[spec.axis] / 1.02);
+            const coord = Math.round(c.position[spec.axis] / 1.0);
             if (coord === spec.layer) moving.push(c);
           }
         }
@@ -606,9 +702,9 @@
         for (const c of moving) {
           c.applyMatrix4(pivot.matrix);
           c.position.set(
-            Math.round(c.position.x / 1.02) * 1.02,
-            Math.round(c.position.y / 1.02) * 1.02,
-            Math.round(c.position.z / 1.02) * 1.02
+            Math.round(c.position.x / 1.0) * 1.0,
+            Math.round(c.position.y / 1.0) * 1.0,
+            Math.round(c.position.z / 1.0) * 1.0
           );
           const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
           const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
@@ -683,13 +779,13 @@
             pivot.rotation[spec.axis] = spec.angle;
             pivot.updateMatrix();
             for (const c of cubies) {
-              const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.02);
+              const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.0);
               if (spec.layer === null || coord === spec.layer) {
                 c.applyMatrix4(pivot.matrix);
                 c.position.set(
-                  Math.round(c.position.x / 1.02) * 1.02,
-                  Math.round(c.position.y / 1.02) * 1.02,
-                  Math.round(c.position.z / 1.02) * 1.02
+                  Math.round(c.position.x / 1.0) * 1.0,
+                  Math.round(c.position.y / 1.0) * 1.0,
+                  Math.round(c.position.z / 1.0) * 1.0
                 );
                 const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
                 const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
@@ -713,9 +809,10 @@
         console.error(e);
       }
 
-      document.querySelectorAll('.seg-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.getAttribute('data-mode') === mode);
-      });
+      const sel = document.getElementById('sim-select');
+      if (sel && sel.value !== mode) {
+        sel.value = mode;
+      }
 
       const wrap = document.querySelector('.player-wrap');
       const p = getPlayer();
@@ -740,12 +837,10 @@
         }
       } else {
         threeCube.hide();
-        if (p) {
-          p.style.display = 'block';
-          try { p.setAttribute('visualization', '2D'); } catch {}
-          if (prevMode !== '2D') {
-            syncPlayerMoves(p);
-          }
+        const activeP = (prevMode !== '2D' || !p) ? ensureFresh2DPlayer() : p;
+        if (activeP) {
+          activeP.style.display = 'block';
+          syncPlayerMoves(activeP);
         }
       }
     }
@@ -1221,7 +1316,7 @@
         await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
-            if (state.conn) await conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
+            if (state.conn) await state.conn.sendCubeCommand({ type: "REQUEST_BATTERY" });
           } catch (err) {
             console.error(err);
           }
