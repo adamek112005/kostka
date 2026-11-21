@@ -405,11 +405,19 @@
       faceletsPending: false,
       faceletsPendingTimer: null,
       faceletsReqAt: 0,
+      faceletsReqs: [],
+      lastFaceletsReqAt: -Infinity,
+      resetSeq: 0,
+      lastResetAt: 0,
+      syncMismatch: false,
+      postResetCheck: false,
       lastMoveSerial: null,
       cmdChain: Promise.resolve(),
       dbg: [],
       dbgLastAt: 0,
       lastMoveAt: 0,
+      lastMoveGapMs: Infinity,
+      hadRapidMovesSinceLastSync: false,
       selectedSolveId: null,
       deleteConfirmTimer: null,
       simMode: '2D',
@@ -457,6 +465,16 @@
       el.style.display = 'block';
       if (!persist) {
         noticeTimer = setTimeout(() => { el.style.display = 'none'; }, 6000);
+      }
+    }
+
+    function hideNotice() {
+      clearTimeout(noticeTimer);
+      noticeTimer = null;
+      const el = document.getElementById('app-notice');
+      if (el) {
+        el.style.display = 'none';
+        el.textContent = '';
       }
     }
 
@@ -618,7 +636,10 @@
 
     function cubeCmd(cmd) {
       if (cmd?.type === 'REQUEST_FACELETS') {
-        state.faceletsReqAt = performance.now();
+        const reqAt = performance.now();
+        state.faceletsReqAt = reqAt;
+        state.faceletsReqs.push({ at: reqAt, resetSeq: state.resetSeq });
+        if (state.faceletsReqs.length > 12) state.faceletsReqs.shift();
       }
       const run = () => (state.conn ? Promise.race([
         state.conn.sendCubeCommand(cmd),
@@ -626,6 +647,40 @@
       ]) : null);
       state.cmdChain = state.cmdChain.then(run).catch(e => dbg('cmd error ' + e));
       return state.cmdChain;
+    }
+
+    function requestFaceletsNow() {
+      if (!state.conn) return;
+      clearTimeout(state.faceletsDebounce);
+      state.faceletsDebounce = null;
+      state.faceletsPending = true;
+      clearTimeout(state.faceletsPendingTimer);
+      state.faceletsPendingTimer = setTimeout(() => {
+        state.faceletsPending = false;
+      }, 1500);
+      state.lastFaceletsReqAt = performance.now();
+      cubeCmd({ type: "REQUEST_FACELETS" });
+    }
+
+    function scheduleFaceletsAfterMove() {
+      if (!state.conn) return;
+      clearTimeout(state.faceletsDebounce);
+      const now = performance.now();
+      const delay = Math.max(700, 2000 - (now - state.lastFaceletsReqAt));
+      state.faceletsDebounce = setTimeout(() => {
+        state.faceletsDebounce = null;
+        if (!state.conn) return;
+        const t = performance.now();
+        if (t - state.lastMoveAt < 700 || t - state.lastFaceletsReqAt < 2000) {
+          scheduleFaceletsAfterMove();
+          return;
+        }
+        if (state.faceletsPending) {
+          state.faceletsDebounce = setTimeout(scheduleFaceletsAfterMove, 200);
+          return;
+        }
+        requestFaceletsNow();
+      }, delay);
     }
 
     let netRenderScheduled = false;
@@ -1124,17 +1179,6 @@
           } catch (err) {
             console.error(err);
             dbg('3D reset err: ' + (err?.message || err));
-          }
-        },
-        healFromFacelets(facelets) {
-          if (!initialized) return;
-          try {
-            dbg('3D heal from facelets');
-            resetCubiesToHome(facelets);
-            requestRender();
-          } catch (err) {
-            console.error(err);
-            dbg('3D heal err: ' + (err?.message || err));
           }
         },
         applyMovesInstant(movesList) {
@@ -1743,11 +1787,13 @@
       }
       state.P = [];
       state.trackingActive = true;
+      state.hadRapidMovesSinceLastSync = false;
+      state.lastMoveGapMs = Infinity;
       buildScrambleBaseline(SOLVED_FACELETS);
       scheduleNetRender();
       renderScramble();
-      if (state.conn && !state.P.length) {
-        cubeCmd({ type: "REQUEST_FACELETS" });
+      if (state.conn) {
+        requestFaceletsNow();
       }
     }
 
@@ -1767,14 +1813,34 @@
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
       const serial = (isObj && typeof move.serial === 'number') ? move.serial : null;
-      const cubeTs = (isObj && typeof move.timestamp === 'number') ? move.timestamp : null;
+      const cubeTs = isObj
+        ? (typeof move.cubeTimestamp === 'number' && Number.isFinite(move.cubeTimestamp)
+            ? move.cubeTimestamp
+            : (typeof move.timestamp === 'number' && Number.isFinite(move.timestamp) ? move.timestamp : null))
+        : null;
+      const localTs = (isObj && typeof move.localTimestamp === 'number' && Number.isFinite(move.localTimestamp))
+        ? move.localTimestamp
+        : null;
 
       state.cubeMoves.push(str);
 
       const now = performance.now();
+      const moveGapMs = state.lastMoveAt > 0 ? (now - state.lastMoveAt) : Infinity;
       state.lastMoveAt = now;
-      if (serial !== null) state.lastMoveSerial = serial;
-      dbg(`MOVE ${str} ser=${serial} cts=${cubeTs} lts=${Math.round(now)}`);
+      state.lastMoveGapMs = moveGapMs;
+      if (moveGapMs <= 60) state.hadRapidMovesSinceLastSync = true;
+      state.postResetCheck = false;
+
+      dbg(`MOVE ${str} ser=${serial} cts=${cubeTs} lts=${localTs}`);
+      if (isObj && localTs === null) {
+        dbg(`RECOVERED MOVE ${str} ser=${serial}`);
+      }
+      if (serial !== null) {
+        if (state.lastMoveSerial !== null && serial !== ((state.lastMoveSerial + 1) % 256)) {
+          dbg(`SERIAL GAP prev=${state.lastMoveSerial} cur=${serial}`);
+        }
+        state.lastMoveSerial = serial;
+      }
 
       let isSolved = false;
       if (!/^[xyz]/i.test(str)) {
@@ -1949,9 +2015,39 @@
       }
     };
 
-    window.reset = () => {
+    window.reset = async () => {
+      clearTimeout(state.faceletsDebounce);
+      state.faceletsDebounce = null;
+      clearTimeout(state.faceletsPendingTimer);
+      state.faceletsPendingTimer = null;
+      state.faceletsPending = false;
+      state.resetSeq++;
+      state.lastResetAt = performance.now();
+      state.syncMismatch = false;
+      state.postResetCheck = false;
+      state.hadRapidMovesSinceLastSync = false;
+      state.lastMoveGapMs = Infinity;
+      hideNotice();
+
       resetTrackingAndTimer();
+      const val = document.getElementById('timer-val');
+      if (val) val.textContent = '0.00';
+      state.lastDisplayedTimer = '0.00';
+      buildScrambleBaseline(SOLVED_FACELETS);
       renderScramble();
+
+      if (state.conn) {
+        const myResetSeq = state.resetSeq;
+        try {
+          await cubeCmd({ type: "REQUEST_RESET" });
+        } catch (e) {
+          dbg('REQUEST_RESET err: ' + (e?.message || e));
+        }
+        if (state.conn && state.resetSeq === myResetSeq) {
+          state.postResetCheck = true;
+          requestFaceletsNow();
+        }
+      }
     };
 
     function renderStatusBadge(status) {
@@ -2051,54 +2147,55 @@
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
             handleMove(ev);
-            clearTimeout(state.faceletsDebounce);
-            state.faceletsDebounce = setTimeout(() => {
-              if (state.conn && !state.faceletsPending) {
-                state.faceletsPending = true;
-                clearTimeout(state.faceletsPendingTimer);
-                state.faceletsPendingTimer = setTimeout(() => {
-                  state.faceletsPending = false;
-                }, 1500);
-                cubeCmd({ type: "REQUEST_FACELETS" });
-              }
-            }, 250);
+            scheduleFaceletsAfterMove();
           } else if (ev.type === "FACELETS") {
-            state.faceletsPending = false;
-            clearTimeout(state.faceletsPendingTimer);
+            const req = state.faceletsReqs.shift() || { at: state.faceletsReqAt, resetSeq: state.resetSeq };
+            if (state.faceletsReqs.length === 0) {
+              state.faceletsPending = false;
+              clearTimeout(state.faceletsPendingTimer);
+            }
             if (typeof ev.facelets === 'string' && ev.facelets.length === 54) {
               const now = performance.now();
-              const moveAfterReq = state.lastMoveAt > state.faceletsReqAt;
+              const preReset = req.resetSeq !== state.resetSeq || req.at < state.lastResetAt;
+              const moveAfterReq = state.lastMoveAt > req.at;
               const evSerial = typeof ev.serial === 'number' ? ev.serial : null;
               const serialMismatch = evSerial !== null && state.lastMoveSerial !== null && evSerial !== state.lastMoveSerial;
               const quietOk = (now - state.lastMoveAt) >= 150;
 
-              if (moveAfterReq || serialMismatch || !quietOk) {
-                dbg(`FACELETS stale ignored (afterReq=${moveAfterReq} ser=${evSerial}/${state.lastMoveSerial} quiet=${Math.round(now - state.lastMoveAt)}ms)`);
+              if (preReset || moveAfterReq || serialMismatch || !quietOk) {
+                dbg(`FACELETS stale ignored (preReset=${preReset} afterReq=${moveAfterReq} ser=${evSerial}/${state.lastMoveSerial} quiet=${Math.round(now - state.lastMoveAt)}ms)`);
                 return;
               }
 
-              const matched = ev.facelets === state.liveFacelets;
-              dbg(matched ? "FACELETS match" : "FACELETS differ");
-              let adopted = false;
-              if (!matched) {
-                state.liveFacelets = ev.facelets;
-                adopted = true;
-                scheduleNetRender();
-                if (state.simMode === '3D') {
-                  threeCube.healFromFacelets(ev.facelets);
-                }
-                dbg("resync adopted");
-              }
-              if (state.trackingActive && state.timerState === 'IDLE') {
-                if (adopted && !state.P.length) {
-                  buildScrambleBaseline(state.liveFacelets);
-                }
-                afterScrambleProgress();
-              }
               if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
                 state.liveFacelets = SOLVED_FACELETS;
                 scheduleNetRender();
                 checkSolvedAndFinish(state.lastMoveAt || now);
+                return;
+              }
+
+              if (ev.facelets === state.liveFacelets) {
+                dbg("FACELETS match");
+                state.postResetCheck = false;
+                state.hadRapidMovesSinceLastSync = false;
+                if (state.syncMismatch) {
+                  state.syncMismatch = false;
+                  hideNotice();
+                }
+              } else {
+                let diffCount = 0;
+                for (let i = 0; i < 54; i++) {
+                  if (ev.facelets[i] !== state.liveFacelets[i]) diffCount++;
+                }
+                const rapid = state.hadRapidMovesSinceLastSync;
+                dbg(`FACELETS mismatch diff=${diffCount}/54 rapid<=60ms=${rapid} (lastGap=${Number.isFinite(state.lastMoveGapMs) ? Math.round(state.lastMoveGapMs) + 'ms' : 'n/a'})`);
+                state.syncMismatch = true;
+                if (state.postResetCheck) {
+                  state.postResetCheck = false;
+                  showNotice("Cube still reports a different state; the app uses move tracking only.", false, true);
+                } else {
+                  showNotice("Cube and app disagree. Solve the cube and press Reset.", false, true);
+                }
               }
             }
           } else if (ev.type === "BATTERY") {
@@ -2109,6 +2206,9 @@
             clearTimeout(state.faceletsDebounce);
             clearTimeout(state.faceletsPendingTimer);
             state.faceletsPending = false;
+            state.faceletsReqs = [];
+            state.lastMoveSerial = null;
+            state.postResetCheck = false;
             clearBattery();
             if (state.sub) {
               try { state.sub.unsubscribe(); } catch {}
@@ -2119,7 +2219,7 @@
           }
         });
 
-        await cubeCmd({ type: "REQUEST_FACELETS" });
+        requestFaceletsNow();
         await cubeCmd({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
