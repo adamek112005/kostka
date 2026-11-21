@@ -47,7 +47,6 @@
     header { display: flex; justify-content: space-between; align-items: center; padding-top: 8px; }
     .status-badge { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 6px; }
     .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-    .btn-group { display: flex; gap: 8px; }
     button {
       font-family: inherit;
       border: 1px solid var(--border);
@@ -62,7 +61,6 @@
     }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    button.ready { background: var(--ready); color: #fff; border-color: var(--ready); }
     button.danger { color: var(--danger); }
     .banner {
       background: var(--card);
@@ -156,27 +154,6 @@
     .stat-val { font-size: 1.15rem; font-weight: 700; font-family: ui-monospace, monospace; }
     .stat-lbl { font-size: 0.72rem; color: var(--sub); text-transform: uppercase; }
     .chart-box { width: 100%; height: 50px; }
-    .history-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .history-head { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; font-weight: 600; }
-    .history-list { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
-    .history-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 0.85rem;
-      padding: 6px 8px;
-      border-radius: 6px;
-      background: var(--bg);
-    }
-    .history-meta { font-family: ui-monospace, monospace; font-size: 0.78rem; color: var(--sub); }
     .action-bar {
       position: fixed;
       bottom: 0;
@@ -284,6 +261,7 @@
     <div id="bt-unsupported" class="banner" style="border-color:var(--danger);color:var(--danger);">
       Web Bluetooth is not supported. Use Chrome/Edge on Android or Bluefy on iOS.
     </div>
+    <div id="app-notice" class="banner"></div>
 
     <div id="scramble-text" class="scramble-box">Generating…</div>
 
@@ -358,7 +336,7 @@
       <button id="btn-toggle-dnf" onclick="toggleSelectedDnf()">DNF</button>
     </div>
     <div style="display:flex;justify-content:center;gap:8px;">
-      <button class="danger" onclick="deleteSelectedSolve()">Delete</button>
+      <button id="btn-delete-solve" class="danger" onclick="deleteSelectedSolve()">Delete</button>
       <button onclick="copySelectedSolveMoves()">Copy moves</button>
       <button onclick="closeSolveDialog()">Close</button>
     </div>
@@ -399,18 +377,6 @@
   </dialog>
 
   <script type="module">
-    window.onerror = (msg, src, line, col, err) => {
-      console.error(err || msg);
-    };
-    window.addEventListener('unhandledrejection', (e) => {
-      console.error(e.reason);
-    });
-
-    import { randomScrambleForEvent } from "https://esm.sh/cubing@0.52.2/scramble";
-    import { connectGanCube } from "https://esm.sh/gan-web-bluetooth";
-    import * as THREE from "https://esm.sh/three@0.170.0";
-    import { RoundedBoxGeometry } from "https://esm.sh/three@0.170.0/examples/jsm/geometries/RoundedBoxGeometry.js";
-
     const SOLVED_FACELETS = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB";
     const NET_COLORS = {
       U: '#f8fafc',
@@ -429,7 +395,132 @@
       ['B', 3, 1]
     ];
 
+    const state = {
+      conn: null,
+      sub: null,
+      connecting: false,
+      batteryTimer: null,
+      dnfTimer: null,
+      faceletsDebounce: null,
+      faceletsPending: false,
+      faceletsPendingTimer: null,
+      faceletsReqAt: 0,
+      lastMoveSerial: null,
+      cmdChain: Promise.resolve(),
+      dbg: [],
+      dbgLastAt: 0,
+      lastMoveAt: 0,
+      selectedSolveId: null,
+      deleteConfirmTimer: null,
+      simMode: '2D',
+      liveFacelets: SOLVED_FACELETS,
+      targetFacelets: SOLVED_FACELETS,
+      cubeMoves: [],
+      timerState: 'IDLE',
+      solveCompleting: false,
+      solveSeq: 0,
+      lastFinishedSeq: -1,
+      startTime: 0,
+      lastDisplayedTimer: '',
+      rafId: null,
+      scrambles: [],
+      scrambleIndex: -1,
+      prefetchedScramble: null,
+      scrambleLock: false,
+      scramble: '',
+      rawTokens: [],
+      tokenGroup: [],
+      S: [],
+      P: [],
+      prefix: [],
+      trackingActive: false,
+      moves: [],
+      solves: []
+    };
+
+    function dbg(text) {
+      const now = Math.round(performance.now());
+      const dt = state.dbg.length ? (now - state.dbgLastAt) : 0;
+      state.dbgLastAt = now;
+      state.dbg.push(`+${dt} ${text}`);
+      if (state.dbg.length > 60) state.dbg.shift();
+    }
+
+    let noticeTimer = null;
+    function showNotice(msg, isDanger = false, persist = false) {
+      const el = document.getElementById('app-notice');
+      if (!el) return;
+      clearTimeout(noticeTimer);
+      el.style.borderColor = isDanger ? 'var(--danger)' : 'var(--warn)';
+      el.style.color = isDanger ? 'var(--danger)' : 'var(--warn)';
+      el.textContent = msg;
+      el.style.display = 'block';
+      if (!persist) {
+        noticeTimer = setTimeout(() => { el.style.display = 'none'; }, 6000);
+      }
+    }
+
+    window.onerror = (msg, src, line, col, err) => {
+      console.error(err || msg);
+      dbg('ERR ' + (err?.message || msg));
+    };
+    window.addEventListener('unhandledrejection', (e) => {
+      console.error(e.reason);
+      dbg('REJ ' + (e.reason?.message || e.reason));
+    });
+
+    const URL_SCRAMBLE = "https://esm.sh/cubing@0.52.2/scramble";
+    const URL_GAN = "https://esm.sh/gan-web-bluetooth";
+    const URL_THREE = "https://esm.sh/three@0.170.0";
+    const URL_ROUNDED_BOX = "https://esm.sh/three@0.170.0/examples/jsm/geometries/RoundedBoxGeometry.js";
+
+    let scrambleModPromise = null, scrambleModFailed = false;
+    function loadScrambleMod() {
+      if (scrambleModFailed) return Promise.resolve(null);
+      if (!scrambleModPromise) {
+        scrambleModPromise = import(URL_SCRAMBLE).catch(err => {
+          scrambleModFailed = true;
+          console.error(err);
+          dbg('LIB FAIL scramble: ' + (err?.message || err));
+          showNotice('Scramble library failed to load; using local generator.');
+          return null;
+        });
+      }
+      return scrambleModPromise;
+    }
+
+    let ganModPromise = null;
+    function loadGanMod() {
+      if (!ganModPromise) {
+        ganModPromise = import(URL_GAN).catch(err => {
+          ganModPromise = null;
+          console.error(err);
+          dbg('LIB FAIL bluetooth: ' + (err?.message || err));
+          showNotice('Connection library failed to load.', true);
+          return null;
+        });
+      }
+      return ganModPromise;
+    }
+
+    let threeModsPromise = null;
+    function loadThreeMods() {
+      if (!threeModsPromise) {
+        threeModsPromise = Promise.all([import(URL_THREE), import(URL_ROUNDED_BOX)]).then(([THREE, rb]) => ({
+          THREE,
+          RoundedBoxGeometry: rb.RoundedBoxGeometry
+        })).catch(err => {
+          threeModsPromise = null;
+          console.error(err);
+          dbg('LIB FAIL three: ' + (err?.message || err));
+          return null;
+        });
+      }
+      return threeModsPromise;
+    }
+
     const netRects = [];
+    const netLastColors = new Array(54).fill(null);
     (() => {
       const svg = document.getElementById('net');
       if (!svg) return;
@@ -525,52 +616,10 @@
       return next.join('');
     }
 
-    const state = {
-      conn: null,
-      sub: null,
-      connecting: false,
-      batteryTimer: null,
-      dnfTimer: null,
-      faceletsDebounce: null,
-      faceletsPending: false,
-      faceletsPendingTimer: null,
-      cmdChain: Promise.resolve(),
-      dbg: [],
-      dbgLastAt: 0,
-      lastMoveAt: 0,
-      selectedSolveId: null,
-      simMode: '2D',
-      liveFacelets: SOLVED_FACELETS,
-      targetFacelets: SOLVED_FACELETS,
-      cubeMoves: [],
-      timerState: 'IDLE',
-      solveCompleting: false,
-      solveSeq: 0,
-      lastFinishedSeq: -1,
-      startTime: 0,
-      rafId: null,
-      scrambles: [],
-      scrambleIndex: -1,
-      scramble: '',
-      rawTokens: [],
-      tokenGroup: [],
-      S: [],
-      P: [],
-      prefix: [],
-      trackingActive: false,
-      moves: [],
-      solves: []
-    };
-
-    function dbg(text) {
-      const now = Math.round(performance.now());
-      const dt = state.dbg.length ? (now - state.dbgLastAt) : 0;
-      state.dbgLastAt = now;
-      state.dbg.push(`+${dt} ${text}`);
-      if (state.dbg.length > 60) state.dbg.shift();
-    }
-
     function cubeCmd(cmd) {
+      if (cmd?.type === 'REQUEST_FACELETS') {
+        state.faceletsReqAt = performance.now();
+      }
       const run = () => (state.conn ? Promise.race([
         state.conn.sendCubeCommand(cmd),
         new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
@@ -583,7 +632,11 @@
     function renderNet() {
       const src = state.simMode === 'Off' ? state.targetFacelets : state.liveFacelets;
       for (let i = 0; i < 54; i++) {
-        netRects[i]?.setAttribute('fill', NET_COLORS[src[i]] || NET_COLORS.U);
+        const col = NET_COLORS[src[i]] || NET_COLORS.U;
+        if (netLastColors[i] !== col) {
+          netLastColors[i] = col;
+          netRects[i]?.setAttribute('fill', col);
+        }
       }
     }
 
@@ -596,7 +649,7 @@
       });
     }
 
-    function resetCube2D() {
+    function resetCubeVisuals() {
       threeCube.reset();
       state.cubeMoves = [];
       state.liveFacelets = SOLVED_FACELETS;
@@ -606,12 +659,21 @@
 
     // --- Independent Three.js 3D Cube Preview ---
     const threeCube = (() => {
+      let THREE = null;
       let scene = null, camera = null, renderer = null, rootGroup = null;
       let cubies = [];
+      let stickerMeshes = [];
+      let stickerMats = null;
+      let sharedBodyGeo = null, sharedStickerGeo = null, bodyMat = null;
       let animId = null;
       let initialized = false;
-      let activeTurn = null;
-      const queue = [];
+      let initPromise = null;
+      let dragging = false;
+      let dirty = false;
+
+      const activeTurns = [];
+      const pendingTurns = [];
+      const HALF_PI = Math.PI / 2;
 
       const COLORS = {
         U: 0xf8fafc,
@@ -619,9 +681,29 @@
         R: 0xef4444,
         L: 0xf97316,
         F: 0x22c55e,
-        B: 0x3b82f6,
-        core: 0x0f172a
+        B: 0x3b82f6
       };
+
+      const HOME_STICKER_IDX = (() => {
+        const faces = ['U', 'R', 'F', 'D', 'L', 'B'];
+        const map = new Map();
+        for (let fi = 0; fi < 6; fi++) {
+          const f = faces[fi];
+          for (let k = 0; k < 9; k++) {
+            const r = Math.floor(k / 3);
+            const c = k % 3;
+            let p;
+            if (f === 'U') p = [c - 1, 1, r - 1];
+            else if (f === 'R') p = [1, 1 - r, 1 - c];
+            else if (f === 'F') p = [c - 1, 1 - r, 1];
+            else if (f === 'D') p = [c - 1, -1, 1 - r];
+            else if (f === 'L') p = [-1, 1 - r, c - 1];
+            else p = [1 - c, 1 - r, -1];
+            map.set(`${p[0]},${p[1]},${p[2]}|${f}`, fi * 9 + k);
+          }
+        }
+        return map;
+      })();
 
       function createStickerGeometry(size, radius) {
         const s = size / 2 - radius;
@@ -638,52 +720,81 @@
         return new THREE.ShapeGeometry(shape, 5);
       }
 
-      const sharedBodyGeo = new RoundedBoxGeometry(0.985, 0.985, 0.985, 4, 0.11);
-      const sharedStickerGeo = createStickerGeometry(0.84, 0.075);
-      const bodyMat = new THREE.MeshStandardMaterial({
-        color: 0x0b0f17,
-        roughness: 0.32,
-        metalness: 0.08
-      });
-
-      function addSticker(parent, colorHex, pos, rot) {
-        const mat = new THREE.MeshStandardMaterial({
-          color: colorHex,
-          roughness: 0.28,
-          metalness: 0.04
-        });
-        const sticker = new THREE.Mesh(sharedStickerGeo, mat);
+      function addSticker(parent, face, x, y, z, pos, rot) {
+        const idx = HOME_STICKER_IDX.get(`${x},${y},${z}|${face}`);
+        const sticker = new THREE.Mesh(sharedStickerGeo, stickerMats[face]);
         sticker.position.set(pos[0], pos[1], pos[2]);
         sticker.rotation.set(rot[0], rot[1], rot[2]);
+        sticker.userData.faceletIdx = idx;
         parent.add(sticker);
+        if (idx !== undefined) stickerMeshes[idx] = sticker;
       }
 
       function createCubie(x, y, z) {
-        const gap = 1.0;
         const group = new THREE.Group();
-        const body = new THREE.Mesh(sharedBodyGeo, bodyMat);
-        group.add(body);
+        group.add(new THREE.Mesh(sharedBodyGeo, bodyMat));
 
         const offset = 0.495;
-        if (x === 1)  addSticker(group, COLORS.R, [offset, 0, 0], [0, Math.PI / 2, 0]);
-        if (x === -1) addSticker(group, COLORS.L, [-offset, 0, 0], [0, -Math.PI / 2, 0]);
-        if (y === 1)  addSticker(group, COLORS.U, [0, offset, 0], [-Math.PI / 2, 0, 0]);
-        if (y === -1) addSticker(group, COLORS.D, [0, -offset, 0], [Math.PI / 2, 0, 0]);
-        if (z === 1)  addSticker(group, COLORS.F, [0, 0, offset], [0, 0, 0]);
-        if (z === -1) addSticker(group, COLORS.B, [0, 0, -offset], [0, Math.PI, 0]);
+        if (x === 1)  addSticker(group, 'R', x, y, z, [offset, 0, 0], [0, HALF_PI, 0]);
+        if (x === -1) addSticker(group, 'L', x, y, z, [-offset, 0, 0], [0, -HALF_PI, 0]);
+        if (y === 1)  addSticker(group, 'U', x, y, z, [0, offset, 0], [-HALF_PI, 0, 0]);
+        if (y === -1) addSticker(group, 'D', x, y, z, [0, -offset, 0], [HALF_PI, 0, 0]);
+        if (z === 1)  addSticker(group, 'F', x, y, z, [0, 0, offset], [0, 0, 0]);
+        if (z === -1) addSticker(group, 'B', x, y, z, [0, 0, -offset], [0, Math.PI, 0]);
 
-        group.position.set(x * gap, y * gap, z * gap);
+        group.position.set(x, y, z);
+        group.userData.home = [x, y, z];
         return group;
       }
 
-      function rebuildCubies() {
+      function snapCubie(c) {
+        c.position.set(
+          Math.round(c.position.x),
+          Math.round(c.position.y),
+          Math.round(c.position.z)
+        );
+        const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
+        const snap = (v) => Math.round(v / HALF_PI) * HALF_PI;
+        c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+      }
+
+      function clearAllTurns() {
+        for (const t of activeTurns) {
+          for (const c of t.moving) {
+            t.pivot.remove(c);
+            rootGroup.add(c);
+          }
+          rootGroup.remove(t.pivot);
+        }
+        activeTurns.length = 0;
+        pendingTurns.length = 0;
+      }
+
+      function resetCubiesToHome(facelets) {
         if (!rootGroup) return;
+        clearAllTurns();
+        for (const c of cubies) {
+          const [hx, hy, hz] = c.userData.home;
+          c.position.set(hx, hy, hz);
+          c.rotation.set(0, 0, 0);
+          c.quaternion.identity();
+        }
+        const src = (typeof facelets === 'string' && facelets.length === 54) ? facelets : SOLVED_FACELETS;
+        for (let i = 0; i < 54; i++) {
+          const m = stickerMeshes[i];
+          if (m) m.material = stickerMats[src[i]] || stickerMats.U;
+        }
+        dirty = true;
+      }
+
+      function buildInitialCubies() {
         while (rootGroup.children.length > 0) {
           rootGroup.remove(rootGroup.children[0]);
         }
         cubies = [];
-        activeTurn = null;
-        queue.length = 0;
+        stickerMeshes = new Array(54);
+        activeTurns.length = 0;
+        pendingTurns.length = 0;
         for (let x = -1; x <= 1; x++) {
           for (let y = -1; y <= 1; y++) {
             for (let z = -1; z <= 1; z++) {
@@ -695,67 +806,103 @@
         }
       }
 
-      function init() {
+      async function init() {
         if (initialized) {
           resize();
-          return;
+          return true;
         }
-        const wrap = document.getElementById('three-wrap');
-        if (!wrap) return;
+        if (initPromise) return initPromise;
+        initPromise = (async () => {
+          const mods = await loadThreeMods();
+          if (!mods) {
+            initPromise = null;
+            return false;
+          }
+          THREE = mods.THREE;
+          const RoundedBoxGeometry = mods.RoundedBoxGeometry;
 
-        scene = new THREE.Scene();
-        const w = Math.max(wrap.clientWidth, 100);
-        const h = Math.max(wrap.clientHeight, 100);
-        camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
-        camera.position.set(4.6, 3.9, 5.2);
-        camera.lookAt(0, 0, 0);
+          const wrap = document.getElementById('three-wrap');
+          if (!wrap) {
+            initPromise = null;
+            return false;
+          }
 
-        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-        renderer.setSize(w, h);
-        wrap.innerHTML = '';
-        wrap.appendChild(renderer.domElement);
+          sharedBodyGeo = new RoundedBoxGeometry(0.985, 0.985, 0.985, 4, 0.11);
+          sharedStickerGeo = createStickerGeometry(0.84, 0.075);
+          bodyMat = new THREE.MeshStandardMaterial({
+            color: 0x0b0f17,
+            roughness: 0.32,
+            metalness: 0.08
+          });
+          stickerMats = {};
+          for (const [k, hex] of Object.entries(COLORS)) {
+            stickerMats[k] = new THREE.MeshStandardMaterial({
+              color: hex,
+              roughness: 0.28,
+              metalness: 0.04
+            });
+          }
 
-        scene.add(new THREE.AmbientLight(0xffffff, 1.35));
-        const dir1 = new THREE.DirectionalLight(0xffffff, 1.1);
-        dir1.position.set(5, 8, 6);
-        scene.add(dir1);
-        const dir2 = new THREE.DirectionalLight(0xffffff, 0.5);
-        dir2.position.set(-5, -4, -5);
-        scene.add(dir2);
+          scene = new THREE.Scene();
+          const w = Math.max(wrap.clientWidth, 100);
+          const h = Math.max(wrap.clientHeight, 100);
+          camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
+          camera.position.set(4.6, 3.9, 5.2);
+          camera.lookAt(0, 0, 0);
 
-        rootGroup = new THREE.Group();
-        rootGroup.rotation.set(0.22, -0.35, 0);
-        scene.add(rootGroup);
+          renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+          renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+          renderer.setSize(w, h);
+          wrap.innerHTML = '';
+          wrap.appendChild(renderer.domElement);
 
-        rebuildCubies();
+          scene.add(new THREE.AmbientLight(0xffffff, 1.35));
+          const dir1 = new THREE.DirectionalLight(0xffffff, 1.1);
+          dir1.position.set(5, 8, 6);
+          scene.add(dir1);
+          const dir2 = new THREE.DirectionalLight(0xffffff, 0.5);
+          dir2.position.set(-5, -4, -5);
+          scene.add(dir2);
 
-        let dragging = false;
-        let lastX = 0, lastY = 0;
-        const dom = renderer.domElement;
-        dom.addEventListener('pointerdown', (e) => {
-          dragging = true;
-          lastX = e.clientX;
-          lastY = e.clientY;
-          dom.style.cursor = 'grabbing';
-        });
-        window.addEventListener('pointermove', (e) => {
-          if (!dragging || !rootGroup) return;
-          const dx = e.clientX - lastX;
-          const dy = e.clientY - lastY;
-          lastX = e.clientX;
-          lastY = e.clientY;
-          rootGroup.rotation.y += dx * 0.012;
-          rootGroup.rotation.x += dy * 0.012;
-        });
-        window.addEventListener('pointerup', () => {
-          dragging = false;
-          if (dom) dom.style.cursor = 'grab';
-        });
+          rootGroup = new THREE.Group();
+          rootGroup.rotation.set(0.22, -0.35, 0);
+          scene.add(rootGroup);
 
-        window.addEventListener('resize', resize);
-        initialized = true;
-        startLoop();
+          buildInitialCubies();
+
+          let lastX = 0, lastY = 0;
+          const dom = renderer.domElement;
+          dom.addEventListener('pointerdown', (e) => {
+            dragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            dom.style.cursor = 'grabbing';
+            requestRender();
+          });
+          window.addEventListener('pointermove', (e) => {
+            if (!dragging || !rootGroup) return;
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            rootGroup.rotation.y += dx * 0.012;
+            rootGroup.rotation.x += dy * 0.012;
+            dirty = true;
+            requestRender();
+          });
+          window.addEventListener('pointerup', () => {
+            if (!dragging) return;
+            dragging = false;
+            if (dom) dom.style.cursor = 'grab';
+          });
+
+          window.addEventListener('resize', resize);
+          initialized = true;
+          dirty = true;
+          requestRender();
+          return true;
+        })();
+        return initPromise;
       }
 
       function resize() {
@@ -766,6 +913,8 @@
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
         renderer.setSize(w, h);
+        dirty = true;
+        requestRender();
       }
 
       function parseMoveSpec(moveStr) {
@@ -774,8 +923,9 @@
         if (!m) return null;
         const face = m[1].toUpperCase();
         const mod = m[2] || '';
+        const isDouble = mod === '2';
         let turns = 1;
-        if (mod === '2') turns = 2;
+        if (isDouble) turns = 2;
         else if (mod === "'") turns = -1;
 
         let axis = 'y', layer = null, dir = 1;
@@ -791,164 +941,245 @@
           case 'Z': axis = 'z'; layer = null; dir = -1; break;
           default: return null;
         }
-        return { axis, layer, angle: dir * turns * (Math.PI / 2) };
+        return { moveStr, axis, layer, isDouble, angle: dir * turns * HALF_PI };
       }
 
-      function beginNextTurn() {
-        if (activeTurn || queue.length === 0) return;
-        const spec = queue.shift();
+      function canStartTurn(spec) {
+        if (activeTurns.length === 0) return true;
+        if (spec.layer === null) return false;
+        for (const t of activeTurns) {
+          if (t.layer === null) return false;
+          if (t.axis !== spec.axis) return false;
+          if (t.layer === spec.layer) return false;
+        }
+        return true;
+      }
+
+      function startTurn(spec, now) {
+        const backlog = activeTurns.length + pendingTurns.length;
+        const baseDur = spec.isDouble ? 160 : 110;
+        const scale = backlog > 0 ? 1 / (1 + 0.35 * backlog) : 1;
+        const duration = Math.max(25, Math.round(baseDur * scale));
+
         const pivot = new THREE.Group();
         pivot.rotation.set(0, 0, 0);
         rootGroup.add(pivot);
 
         const moving = [];
         for (const c of cubies) {
-          if (spec.layer === null) {
+          if (spec.layer === null || Math.round(c.position[spec.axis]) === spec.layer) {
             moving.push(c);
-          } else {
-            const coord = Math.round(c.position[spec.axis] / 1.0);
-            if (coord === spec.layer) moving.push(c);
           }
         }
         for (const c of moving) {
           rootGroup.remove(c);
           pivot.add(c);
         }
-        activeTurn = {
+        activeTurns.push({
+          moveStr: spec.moveStr,
           axis: spec.axis,
+          layer: spec.layer,
           targetAngle: spec.angle,
-          currentAngle: 0,
+          startTime: now,
+          duration,
           pivot,
           moving
-        };
+        });
+        dirty = true;
+        if (scale < 1) {
+          dbg(`3D start ${spec.moveStr} dur=${duration}ms act=${activeTurns.length} pend=${pendingTurns.length}`);
+        } else {
+          dbg(`3D start ${spec.moveStr} act=${activeTurns.length} pend=${pendingTurns.length}`);
+        }
       }
 
-      function finishActiveTurn() {
-        if (!activeTurn) return;
-        const { axis, targetAngle, pivot, moving } = activeTurn;
-        pivot.rotation[axis] = targetAngle;
-        pivot.updateMatrixWorld();
-        for (const c of moving) {
-          c.applyMatrix4(pivot.matrix);
-          c.position.set(
-            Math.round(c.position.x / 1.0) * 1.0,
-            Math.round(c.position.y / 1.0) * 1.0,
-            Math.round(c.position.z / 1.0) * 1.0
-          );
-          const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-          const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-          c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-          pivot.remove(c);
+      function pumpQueue(now) {
+        while (pendingTurns.length > 0 && canStartTurn(pendingTurns[0])) {
+          startTurn(pendingTurns.shift(), now);
+        }
+      }
+
+      function finishTurn(turn) {
+        turn.pivot.rotation[turn.axis] = turn.targetAngle;
+        turn.pivot.updateMatrixWorld();
+        for (const c of turn.moving) {
+          c.applyMatrix4(turn.pivot.matrix);
+          snapCubie(c);
+          turn.pivot.remove(c);
           rootGroup.add(c);
         }
-        rootGroup.remove(pivot);
-        activeTurn = null;
-        beginNextTurn();
+        rootGroup.remove(turn.pivot);
+        dirty = true;
+        dbg(`3D end ${turn.moveStr} act=${activeTurns.length} pend=${pendingTurns.length}`);
       }
 
-      let lastFrameTime = 0;
-      function startLoop() {
-        if (animId) return;
-        lastFrameTime = performance.now();
-        const tick = (now) => {
-          animId = requestAnimationFrame(tick);
-          const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
-          lastFrameTime = now;
-
-          if (!activeTurn && queue.length > 0) {
-            beginNextTurn();
-          }
-          if (activeTurn) {
-            const speed = 14 * (1 + queue.length);
-            const step = Math.sign(activeTurn.targetAngle) * speed * dt;
-            const nextAngle = activeTurn.currentAngle + step;
-            if (Math.abs(nextAngle) >= Math.abs(activeTurn.targetAngle)) {
-              finishActiveTurn();
-            } else {
-              activeTurn.currentAngle = nextAngle;
-              activeTurn.pivot.rotation[activeTurn.axis] = nextAngle;
+      function applyMovesDirect(movesList) {
+        resetCubiesToHome(SOLVED_FACELETS);
+        for (const mv of movesList) {
+          const spec = parseMoveSpec(mv);
+          if (!spec) continue;
+          const pivot = new THREE.Group();
+          pivot.rotation[spec.axis] = spec.angle;
+          pivot.updateMatrix();
+          for (const c of cubies) {
+            if (spec.layer === null || Math.round(c.position[spec.axis]) === spec.layer) {
+              c.applyMatrix4(pivot.matrix);
+              snapCubie(c);
             }
           }
-          if (renderer && scene && camera && state.simMode === '3D') {
-            renderer.render(scene, camera);
+        }
+        dirty = true;
+      }
+
+      function easeOutCubic(t) {
+        const u = 1 - t;
+        return 1 - u * u * u;
+      }
+
+      function requestRender() {
+        if (!initialized || animId || state.simMode !== '3D') return;
+        const tick = (now) => {
+          animId = null;
+          if (state.simMode !== '3D') return;
+          try {
+            if (activeTurns.length > 0) {
+              for (let i = activeTurns.length - 1; i >= 0; i--) {
+                const t = activeTurns[i];
+                const raw = t.duration > 0 ? (now - t.startTime) / t.duration : 1;
+                if (raw >= 1) {
+                  activeTurns.splice(i, 1);
+                  finishTurn(t);
+                } else {
+                  const p = easeOutCubic(Math.max(0, raw));
+                  t.pivot.rotation[t.axis] = t.targetAngle * p;
+                  dirty = true;
+                }
+              }
+              pumpQueue(now);
+            }
+            if (dirty && renderer && scene && camera) {
+              renderer.render(scene, camera);
+              dirty = false;
+            }
+          } catch (err) {
+            console.error(err);
+            dbg('3D tick err: ' + (err?.message || err));
+            try { applyMovesDirect(state.cubeMoves); } catch {}
+          }
+          if (state.simMode === '3D' && (activeTurns.length > 0 || pendingTurns.length > 0 || dragging || dirty)) {
+            animId = requestAnimationFrame(tick);
           }
         };
         animId = requestAnimationFrame(tick);
       }
 
+      function stopLoop() {
+        if (animId) {
+          cancelAnimationFrame(animId);
+          animId = null;
+        }
+      }
+
       return {
-        show() {
-          init();
+        async show() {
+          const ok = await init();
+          if (!ok) return false;
           const wrap = document.getElementById('three-wrap');
           if (wrap) wrap.style.display = 'block';
           resize();
+          dirty = true;
+          requestRender();
+          return true;
         },
         hide() {
+          stopLoop();
           const wrap = document.getElementById('three-wrap');
           if (wrap) wrap.style.display = 'none';
         },
         addMove(moveStr) {
-          const spec = parseMoveSpec(moveStr);
-          if (!spec) return;
-          if (!initialized) init();
-          queue.push(spec);
-          if (!activeTurn) beginNextTurn();
+          if (!initialized) return;
+          try {
+            const spec = parseMoveSpec(moveStr);
+            if (!spec) return;
+            pendingTurns.push(spec);
+            if (activeTurns.length + pendingTurns.length > 8) {
+              dbg(`3D catch-up snap (${activeTurns.length}+${pendingTurns.length})`);
+              applyMovesDirect(state.cubeMoves);
+              requestRender();
+              return;
+            }
+            pumpQueue(performance.now());
+            requestRender();
+          } catch (err) {
+            console.error(err);
+            dbg('3D move err: ' + (err?.message || err));
+            try { applyMovesDirect(state.cubeMoves); } catch {}
+          }
         },
         reset() {
           if (!initialized) return;
-          rebuildCubies();
+          try {
+            resetCubiesToHome(SOLVED_FACELETS);
+            requestRender();
+          } catch (err) {
+            console.error(err);
+            dbg('3D reset err: ' + (err?.message || err));
+          }
+        },
+        healFromFacelets(facelets) {
+          if (!initialized) return;
+          try {
+            dbg('3D heal from facelets');
+            resetCubiesToHome(facelets);
+            requestRender();
+          } catch (err) {
+            console.error(err);
+            dbg('3D heal err: ' + (err?.message || err));
+          }
         },
         applyMovesInstant(movesList) {
-          if (!initialized) init();
-          rebuildCubies();
-          for (const mv of movesList) {
-            const spec = parseMoveSpec(mv);
-            if (!spec) continue;
-            const pivot = new THREE.Group();
-            pivot.rotation[spec.axis] = spec.angle;
-            pivot.updateMatrix();
-            for (const c of cubies) {
-              const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.0);
-              if (spec.layer === null || coord === spec.layer) {
-                c.applyMatrix4(pivot.matrix);
-                c.position.set(
-                  Math.round(c.position.x / 1.0) * 1.0,
-                  Math.round(c.position.y / 1.0) * 1.0,
-                  Math.round(c.position.z / 1.0) * 1.0
-                );
-                const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-                const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-                c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-              }
-            }
+          if (!initialized) return;
+          try {
+            applyMovesDirect(movesList);
+            requestRender();
+          } catch (err) {
+            console.error(err);
+            dbg('3D instant err: ' + (err?.message || err));
           }
         }
       };
     })();
 
-    function setSimMode(mode) {
+    let simModeReq = 0;
+    async function setSimMode(mode) {
       if (mode !== '2D' && mode !== '3D' && mode !== 'Off') {
         mode = '2D';
       }
-      const prevMode = state.simMode;
-      state.simMode = mode;
-      try {
-        localStorage.setItem('gan_sim_mode', mode);
-      } catch (e) {
-        console.error(e);
-      }
-
-      const sel = document.getElementById('sim-select');
-      if (sel && sel.value !== mode) {
-        sel.value = mode;
-      }
-
+      const reqId = ++simModeReq;
       const net = document.getElementById('net');
+      const sel = document.getElementById('sim-select');
+
       if (mode === '3D') {
+        state.simMode = '3D';
+        if (sel && sel.value !== '3D') sel.value = '3D';
         if (net) net.style.display = 'none';
-        threeCube.show();
+        const ok = await threeCube.show();
+        if (reqId !== simModeReq) return;
+        if (!ok) {
+          showNotice('3D library failed to load; switched to 2D.');
+          setSimMode('2D');
+          return;
+        }
+        try {
+          localStorage.setItem('gan_sim_mode', '3D');
+        } catch {}
         threeCube.applyMovesInstant(state.cubeMoves);
       } else {
+        state.simMode = mode;
+        if (sel && sel.value !== mode) sel.value = mode;
+        try {
+          localStorage.setItem('gan_sim_mode', mode);
+        } catch {}
         threeCube.hide();
         if (net) net.style.display = 'block';
         scheduleNetRender();
@@ -983,7 +1214,6 @@
     const TOP_CUBIES = {U:[[0,36,47],[1,46],[2,45,11],[5,10],[8,9,20],[7,19],[6,18,38],[3,37]],R:[[9,20,8],[10,5],[11,2,45],[14,48],[17,51,35],[16,32],[15,29,26],[12,23]],F:[[18,38,6],[19,7],[20,8,9],[23,12],[26,15,29],[25,28],[24,27,44],[21,41]],D:[[27,44,24],[28,25],[29,26,15],[32,16],[35,17,51],[34,52],[33,53,42],[30,43]],L:[[36,47,0],[37,3],[38,6,18],[41,21],[44,24,27],[43,30],[42,33,53],[39,50]],B:[[45,11,2],[46,1],[47,0,36],[50,39],[53,42,33],[52,34],[51,35,17],[48,14]]};
     const OLL_SIG = {'11211121':1,'11112121':2,'01212121':3,'01111111':4,'00212120':5,'00111110':6,'00202121':7,'01111010':8,'01101011':9,'01202021':10,'01212020':11,'00101111':12,'00212021':13,'01101110':14,'01202120':15,'00111011':16,'01110121':17,'01012111':18,'01011121':19,'01010101':20,'10201020':21,'10102020':22,'00002010':23,'00001020':24,'00100020':25,'00101010':26,'00202020':27,'00000101':28,'01011020':29,'00102101':30,'00011120':31,'00001121':32,'00011021':33,'00112001':34,'00110120':35,'00100121':36,'00210110':37,'00200111':38,'00110021':39,'01100120':40,'00201101':41,'01012010':42,'00012110':43,'00002111':44,'00012011':45,'00211001':46,'11112020':47,'10112120':48,'10102121':49,'10202111':50,'10212011':51,'10112021':52,'10211120':53,'10201121':54,'10211021':55,'11201120':56,'00010001':57};
     const PLL_SIG = {'01436527':'Aa','01632547':'Ab','03654721':'E','01276543':'F','01476325':'Ga','01652743':'Gb','03472165':'Gc','05276341':'Gd','05274163':'H','01256347':'Ja','01236745':'Jb','01674523':'Na','05634127':'Nb','03216547':'Ra','01432765':'Rb','01472563':'T','01274365':'Ua','01254763':'Ub','01654327':'V','01634725':'Y','03214765':'Z'};
-    const OLL_NICK = { 21: 'H', 22: 'Pi', 23: 'Headlights', 24: 'Chameleon', 25: 'Bowtie', 26: 'Anti-Sune', 27: 'Sune' };
     const faceOf = i => FACE_L[Math.floor(i / 9)];
     const minOver = (n, fn) => { let best = null; for (let a = 0; a < n; a++) { const s = fn(a); if (best === null || s < best) best = s; } return best; };
     function ollDigits(f, T) {
@@ -1169,7 +1399,8 @@
       const endTime = performance.now();
       const totalMs = Math.round(endTime - state.startTime);
       const sec = (totalMs / 1000).toFixed(2);
-      const moveCount = computeMoveCount(state.moves);
+      const storedMoves = resolveSolveMoves(state.moves, totalMs);
+      const moveCount = computeMoveCount(storedMoves);
       const tps = (totalMs > 0) ? (moveCount / (totalMs / 1000)).toFixed(2) : '0.00';
 
       const val = document.getElementById('timer-val');
@@ -1189,7 +1420,7 @@
         count: moveCount,
         tps: parseFloat(tps),
         scramble: state.scramble,
-        moves: state.moves,
+        moves: storedMoves,
         dnf: true
       });
       saveSolves();
@@ -1199,23 +1430,6 @@
       nextScramble();
     };
 
-    function isFaceletSequenceSolved(scrambleStr, movesList) {
-      let f = SOLVED_FACELETS;
-      const scrTokens = (scrambleStr || '').trim().split(/\s+/);
-      for (const tok of scrTokens) {
-        if (/^[URFDLB]/i.test(tok)) {
-          f = applyFaceletMove(f, tok);
-        }
-      }
-      for (const item of movesList) {
-        const m = typeof item === 'string' ? item : item.m;
-        if (m && /^[URFDLB]/i.test(m)) {
-          f = applyFaceletMove(f, m);
-        }
-      }
-      return f === SOLVED_FACELETS;
-    }
-
     function checkSolvedAndFinish(endTime) {
       if (state.timerState !== 'RUNNING' || state.solveCompleting) return false;
       if (state.lastFinishedSeq === state.solveSeq) return false;
@@ -1223,15 +1437,42 @@
       state.solveCompleting = true;
       state.lastFinishedSeq = state.solveSeq;
       finishSolve(endTime);
-      resetCube2D();
       return true;
     }
 
-    function loadSolves() {
-      try { return JSON.parse(localStorage.getItem('gan_solves') || '[]'); } catch { return []; }
+    function encodeCompactMoves(moves) {
+      return (moves || []).map(x => `${x.m}@${x.t}`).join(' ');
     }
+
+    function decodeCompactMoves(movesField) {
+      if (Array.isArray(movesField)) return movesField;
+      if (typeof movesField !== 'string' || !movesField.trim()) return [];
+      return movesField.trim().split(/\s+/).map(tok => {
+        const at = tok.indexOf('@');
+        if (at < 0) return { m: tok, t: 0 };
+        return { m: tok.slice(0, at), t: Number(tok.slice(at + 1)) || 0 };
+      });
+    }
+
+    function loadSolves() {
+      try {
+        const raw = JSON.parse(localStorage.getItem('gan_solves') || '[]');
+        if (!Array.isArray(raw)) return [];
+        return raw.map(s => ({ ...s, moves: decodeCompactMoves(s.moves) }));
+      } catch {
+        return [];
+      }
+    }
+
     function saveSolves() {
-      try { localStorage.setItem('gan_solves', JSON.stringify(state.solves)); } catch {}
+      try {
+        const compact = state.solves.map(s => ({ ...s, moves: encodeCompactMoves(s.moves) }));
+        localStorage.setItem('gan_solves', JSON.stringify(compact));
+      } catch (err) {
+        console.error(err);
+        dbg('SAVE FAIL: ' + (err?.message || err));
+        showNotice('Storage is full — solve not saved. Export CSV to back up your solves.', true, true);
+      }
     }
 
     function genScramble(len = 20) {
@@ -1250,11 +1491,25 @@
 
     async function generateScrambleString() {
       try {
+        const mod = await loadScrambleMod();
+        if (!mod || !mod.randomScrambleForEvent) return genScramble(20);
         return await Promise.race([
-          randomScrambleForEvent("333").then(s => s.toString()),
+          mod.randomScrambleForEvent("333").then(s => s.toString()),
           new Promise((_, rej) => setTimeout(() => rej(new Error('scramble timeout')), 4000))
         ]);
       } catch (e) { console.error(e); return genScramble(20); }
+    }
+
+    let prefetching = false;
+    async function prefetchNextScramble() {
+      if (prefetching || state.prefetchedScramble) return;
+      prefetching = true;
+      try {
+        const s = await generateScrambleString();
+        if (!state.prefetchedScramble) state.prefetchedScramble = s;
+      } finally {
+        prefetching = false;
+      }
     }
 
     function parseMove(str) {
@@ -1499,17 +1754,27 @@
     function updateTimerDisplay() {
       if (state.timerState !== 'RUNNING') return;
       const ms = performance.now() - state.startTime;
-      document.getElementById('timer-val').textContent = (ms / 1000).toFixed(2);
+      const text = (ms / 1000).toFixed(2);
+      if (text !== state.lastDisplayedTimer) {
+        state.lastDisplayedTimer = text;
+        document.getElementById('timer-val').textContent = text;
+      }
       state.rafId = requestAnimationFrame(updateTimerDisplay);
     }
 
     function handleMove(move) {
+      const isObj = move && typeof move === 'object';
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
+      const serial = (isObj && typeof move.serial === 'number') ? move.serial : null;
+      const cubeTs = (isObj && typeof move.timestamp === 'number') ? move.timestamp : null;
+
       state.cubeMoves.push(str);
 
       const now = performance.now();
       state.lastMoveAt = now;
+      if (serial !== null) state.lastMoveSerial = serial;
+      dbg(`MOVE ${str} ser=${serial} cts=${cubeTs} lts=${Math.round(now)}`);
 
       let isSolved = false;
       if (!/^[xyz]/i.test(str)) {
@@ -1537,7 +1802,8 @@
         if (state.timerState === 'ARMED') {
           state.timerState = 'RUNNING';
           state.startTime = now;
-          state.moves = [{ m: str, t: 0 }];
+          state.lastDisplayedTimer = '0.00';
+          state.moves = [{ m: str, t: 0, ct: cubeTs }];
           const val = document.getElementById('timer-val');
           if (val) {
             val.className = 'timer running';
@@ -1548,15 +1814,9 @@
           state.rafId = requestAnimationFrame(updateTimerDisplay);
         } else if (state.timerState === 'RUNNING') {
           startDnfTimer();
-          state.moves.push({ m: str, t: Math.round(now - state.startTime) });
+          state.moves.push({ m: str, t: Math.round(now - state.startTime), ct: cubeTs });
           const count = computeMoveCount(state.moves);
-          const curTps = (count / ((now - state.startTime) / 1000)).toFixed(2);
-          const sub = document.getElementById('timer-sub');
-          if (sub) sub.textContent = `${count} moves | ${curTps} TPS`;
-
-          if (count >= 3 && (isSolved || isFaceletSequenceSolved(state.scramble, state.moves))) {
-            state.liveFacelets = SOLVED_FACELETS;
-            scheduleNetRender();
+          if (count >= 3 && isSolved) {
             checkSolvedAndFinish(now);
             return;
           }
@@ -1564,6 +1824,31 @@
       } catch (e) {
         console.error(e);
       }
+    }
+
+    function resolveSolveMoves(rawMoves, arrivalTotalMs) {
+      if (!rawMoves || !rawMoves.length) return [];
+      const allNumeric = rawMoves.every(x => typeof x.ct === 'number' && Number.isFinite(x.ct));
+      let nonDecreasing = allNumeric;
+      if (nonDecreasing) {
+        for (let i = 1; i < rawMoves.length; i++) {
+          if (rawMoves[i].ct < rawMoves[i - 1].ct) { nonDecreasing = false; break; }
+        }
+      }
+      if (!nonDecreasing) {
+        dbg(`TS mode=arrival total=${arrivalTotalMs}ms`);
+        return rawMoves.map(({ m, t }) => ({ m, t }));
+      }
+      const baseCt = rawMoves[0].ct;
+      const cubeTotal = Math.round(rawMoves[rawMoves.length - 1].ct - baseCt);
+      const arrivalLastT = rawMoves[rawMoves.length - 1].t;
+      const refTotal = Math.max(arrivalLastT, arrivalTotalMs, 1);
+      const diffRatio = Math.abs(cubeTotal - arrivalLastT) / refTotal;
+      dbg(`TS cube=${cubeTotal}ms arrival=${arrivalLastT}ms (solve=${arrivalTotalMs}ms) diff=${(diffRatio * 100).toFixed(1)}%`);
+      if (diffRatio > 0.15) {
+        return rawMoves.map(({ m, t }) => ({ m, t }));
+      }
+      return rawMoves.map(({ m, ct }) => ({ m, t: Math.round(ct - baseCt) }));
     }
 
     function finishSolve(endTime) {
@@ -1574,7 +1859,8 @@
 
       const totalMs = Math.round(endTime - state.startTime);
       const sec = (totalMs / 1000).toFixed(2);
-      const moveCount = computeMoveCount(state.moves);
+      const storedMoves = resolveSolveMoves(state.moves, totalMs);
+      const moveCount = computeMoveCount(storedMoves);
       const tps = (totalMs > 0) ? (moveCount / (totalMs / 1000)).toFixed(2) : '0.00';
 
       const val = document.getElementById('timer-val');
@@ -1594,7 +1880,7 @@
         count: moveCount,
         tps: parseFloat(tps),
         scramble: state.scramble,
-        moves: state.moves,
+        moves: storedMoves,
         dnf: false
       });
       saveSolves();
@@ -1613,7 +1899,7 @@
       state.moves = [];
       state.P = [];
       state.trackingActive = true;
-      resetCube2D();
+      resetCubeVisuals();
       const val = document.getElementById('timer-val');
       const sub = document.getElementById('timer-sub');
       if (val) { val.className = 'timer'; }
@@ -1630,23 +1916,36 @@
       updateScrambleButtons();
       resetTrackingAndTimer();
       setScramble(state.scrambles[idx]);
+      prefetchNextScramble();
     }
 
     window.prevScramble = () => {
+      if (state.scrambleLock) return;
       if (state.scrambleIndex > 0) {
         loadScrambleIndex(state.scrambleIndex - 1);
       }
     };
 
     window.nextScramble = async () => {
-      if (state.scrambleIndex < state.scrambles.length - 1) {
-        loadScrambleIndex(state.scrambleIndex + 1);
-      } else {
-        const box = document.getElementById('scramble-text');
-        if (box) box.textContent = 'Generating…';
-        const s = await generateScrambleString();
-        state.scrambles.push(s);
-        loadScrambleIndex(state.scrambles.length - 1);
+      if (state.scrambleLock) return;
+      state.scrambleLock = true;
+      try {
+        if (state.scrambleIndex < state.scrambles.length - 1) {
+          loadScrambleIndex(state.scrambleIndex + 1);
+        } else if (state.prefetchedScramble) {
+          const s = state.prefetchedScramble;
+          state.prefetchedScramble = null;
+          state.scrambles.push(s);
+          loadScrambleIndex(state.scrambles.length - 1);
+        } else {
+          const box = document.getElementById('scramble-text');
+          if (box) box.textContent = 'Generating…';
+          const s = await generateScrambleString();
+          state.scrambles.push(s);
+          loadScrambleIndex(state.scrambles.length - 1);
+        }
+      } finally {
+        state.scrambleLock = false;
       }
     };
 
@@ -1699,6 +1998,25 @@
       renderStatusBadge('disconnected');
     };
 
+    const ADDR_KEY = 'gan_cube_mac';
+    const DEFAULT_ADDR = '0C:3D:5E:99:35:D6';
+    function getStoredCubeAddr() {
+      try {
+        if (localStorage.getItem(ADDR_KEY) === null) {
+          localStorage.setItem(ADDR_KEY, DEFAULT_ADDR);
+        }
+        return localStorage.getItem(ADDR_KEY) || null;
+      } catch {
+        return DEFAULT_ADDR;
+      }
+    }
+    function setStoredCubeAddr(addr) {
+      try {
+        if (addr) localStorage.setItem(ADDR_KEY, addr);
+        else localStorage.removeItem(ADDR_KEY);
+      } catch {}
+    }
+
     async function connectCube() {
       if (!navigator.bluetooth) {
         document.getElementById('bt-unsupported').style.display = 'block';
@@ -1707,15 +2025,32 @@
       state.connecting = true;
       renderStatusBadge('connecting');
       try {
-        const conn = await connectGanCube(async (device, isFallback) => "0C:3D:5E:99:35:D6");
+        const ganMod = await loadGanMod();
+        if (!ganMod || !ganMod.connectGanCube) {
+          state.connecting = false;
+          renderStatusBadge('disconnected');
+          return;
+        }
+        const conn = await ganMod.connectGanCube(async (device, isFallback) => {
+          if (!isFallback) {
+            return getStoredCubeAddr();
+          }
+          const cur = getStoredCubeAddr() || '';
+          const ans = window.prompt('Enter cube Bluetooth MAC address (e.g. XX:XX:XX:XX:XX:XX):', cur);
+          const trimmed = ans ? ans.trim() : '';
+          if (trimmed) {
+            setStoredCubeAddr(trimmed);
+            return trimmed;
+          }
+          return null;
+        });
         state.conn = conn;
         state.connecting = false;
         renderStatusBadge('connected');
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
-            dbg("MOVE " + ev.move + " serial " + ev.serial);
-            handleMove(ev.move);
+            handleMove(ev);
             clearTimeout(state.faceletsDebounce);
             state.faceletsDebounce = setTimeout(() => {
               if (state.conn && !state.faceletsPending) {
@@ -1731,14 +2066,27 @@
             state.faceletsPending = false;
             clearTimeout(state.faceletsPendingTimer);
             if (typeof ev.facelets === 'string' && ev.facelets.length === 54) {
+              const now = performance.now();
+              const moveAfterReq = state.lastMoveAt > state.faceletsReqAt;
+              const evSerial = typeof ev.serial === 'number' ? ev.serial : null;
+              const serialMismatch = evSerial !== null && state.lastMoveSerial !== null && evSerial !== state.lastMoveSerial;
+              const quietOk = (now - state.lastMoveAt) >= 150;
+
+              if (moveAfterReq || serialMismatch || !quietOk) {
+                dbg(`FACELETS stale ignored (afterReq=${moveAfterReq} ser=${evSerial}/${state.lastMoveSerial} quiet=${Math.round(now - state.lastMoveAt)}ms)`);
+                return;
+              }
+
               const matched = ev.facelets === state.liveFacelets;
               dbg(matched ? "FACELETS match" : "FACELETS differ");
-              const now = performance.now();
               let adopted = false;
-              if (now - state.lastMoveAt >= 150 && !matched) {
+              if (!matched) {
                 state.liveFacelets = ev.facelets;
                 adopted = true;
                 scheduleNetRender();
+                if (state.simMode === '3D') {
+                  threeCube.healFromFacelets(ev.facelets);
+                }
                 dbg("resync adopted");
               }
               if (state.trackingActive && state.timerState === 'IDLE') {
@@ -1797,21 +2145,36 @@
       return s.time.toFixed(2);
     }
 
+    function evalWindowAvg(slice) {
+      const n = slice.length;
+      const trim = Math.ceil(n * 0.05);
+      const dnfCount = slice.filter(s => s.dnf).length;
+      if (dnfCount > trim) return Infinity;
+      const sorted = slice
+        .map(s => (s.dnf ? Infinity : effTime(s)))
+        .sort((a, b) => a - b)
+        .slice(trim, n - trim);
+      if (!sorted.length) return Infinity;
+      return sorted.reduce((a, b) => a + b, 0) / sorted.length;
+    }
+
     function calcTrimmedMean(arr, n) {
       if (arr.length < n) return '—';
-      const s = arr.slice(0, n).map(effTime).sort((a, b) => a - b).slice(1, n - 1);
-      return (s.reduce((a, b) => a + b, 0) / s.length).toFixed(2);
+      const avg = evalWindowAvg(arr.slice(0, n));
+      return avg === Infinity ? 'DNF' : avg.toFixed(2);
     }
 
     function calcBestAo(arr, n) {
       if (arr.length < n) return '—';
       let best = Infinity;
+      let sawDNF = false;
       for (let i = 0; i <= arr.length - n; i++) {
-        const s = arr.slice(i, i + n).map(effTime).sort((a, b) => a - b).slice(1, n - 1);
-        const avg = s.reduce((a, b) => a + b, 0) / s.length;
-        if (avg < best) best = avg;
+        const avg = evalWindowAvg(arr.slice(i, i + n));
+        if (avg === Infinity) sawDNF = true;
+        else if (avg < best) best = avg;
       }
-      return best === Infinity ? '—' : best.toFixed(2);
+      if (best < Infinity) return best.toFixed(2);
+      return sawDNF ? 'DNF' : '—';
     }
 
     function calcMedian(times) {
@@ -1835,18 +2198,11 @@
       const ao50El = document.getElementById('st-ao50');
       const ao100El = document.getElementById('st-ao100');
 
-      if (!valid.length) {
-        if (bestEl) bestEl.textContent = '—';
-        if (ao5El) ao5El.textContent = '—';
-        if (ao50El) ao50El.textContent = '—';
-        if (ao100El) ao100El.textContent = '—';
-        return;
-      }
       const times = valid.map(effTime);
-      if (bestEl) bestEl.textContent = Math.min(...times).toFixed(2);
-      if (ao5El) ao5El.textContent = calcTrimmedMean(valid, 5);
-      if (ao50El) ao50El.textContent = calcTrimmedMean(valid, 50);
-      if (ao100El) ao100El.textContent = calcTrimmedMean(valid, 100);
+      if (bestEl) bestEl.textContent = times.length ? Math.min(...times).toFixed(2) : '—';
+      if (ao5El) ao5El.textContent = calcTrimmedMean(state.solves, 5);
+      if (ao50El) ao50El.textContent = calcTrimmedMean(state.solves, 50);
+      if (ao100El) ao100El.textContent = calcTrimmedMean(state.solves, 100);
     }
 
     function renderSolvesList() {
@@ -1882,8 +2238,15 @@
       const count = list.length;
 
       document.getElementById('dt-count').textContent = count;
+      document.getElementById('dt-ao5').textContent = calcTrimmedMean(state.solves, 5);
+      document.getElementById('dt-ao12').textContent = calcTrimmedMean(state.solves, 12);
+      document.getElementById('dt-ao50').textContent = calcTrimmedMean(state.solves, 50);
+      document.getElementById('dt-ao100').textContent = calcTrimmedMean(state.solves, 100);
+      document.getElementById('dt-best-ao5').textContent = calcBestAo(state.solves, 5);
+      document.getElementById('dt-best-ao12').textContent = calcBestAo(state.solves, 12);
+
       if (!count) {
-        ['dt-best','dt-worst','dt-mean','dt-median','dt-sd','dt-ao5','dt-ao12','dt-ao50','dt-ao100','dt-best-ao5','dt-best-ao12','dt-tps','dt-moves'].forEach(id => {
+        ['dt-best','dt-worst','dt-mean','dt-median','dt-sd','dt-tps','dt-moves'].forEach(id => {
           document.getElementById(id).textContent = '—';
         });
         document.getElementById('chart-svg').innerHTML = '';
@@ -1896,12 +2259,6 @@
       document.getElementById('dt-mean').textContent = meanNum.toFixed(2);
       document.getElementById('dt-median').textContent = calcMedian(times);
       document.getElementById('dt-sd').textContent = calcStdDev(times, meanNum);
-      document.getElementById('dt-ao5').textContent = calcTrimmedMean(list, 5);
-      document.getElementById('dt-ao12').textContent = calcTrimmedMean(list, 12);
-      document.getElementById('dt-ao50').textContent = calcTrimmedMean(list, 50);
-      document.getElementById('dt-ao100').textContent = calcTrimmedMean(list, 100);
-      document.getElementById('dt-best-ao5').textContent = calcBestAo(list, 5);
-      document.getElementById('dt-best-ao12').textContent = calcBestAo(list, 12);
       document.getElementById('dt-tps').textContent = (list.reduce((a, b) => a + b.tps, 0) / count).toFixed(2);
       document.getElementById('dt-moves').textContent = (list.reduce((a, b) => a + b.count, 0) / count).toFixed(1);
 
@@ -1982,6 +2339,16 @@
       return `<div class="steps-bar">${bar}</div><div class="steps-scroll"><table class="steps-table"><thead><tr><th></th>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     }
 
+    function resetDeleteButton() {
+      clearTimeout(state.deleteConfirmTimer);
+      state.deleteConfirmTimer = null;
+      const btn = document.getElementById('btn-delete-solve');
+      if (btn) {
+        btn.textContent = 'Delete';
+        delete btn.dataset.confirming;
+      }
+    }
+
     function refreshSolveDialog() {
       if (state.selectedSolveId == null) return;
       const s = state.solves.find(x => x.id === state.selectedSolveId);
@@ -2040,6 +2407,7 @@
 
     window.openSolveDialog = (id) => {
       state.selectedSolveId = id;
+      resetDeleteButton();
       const s = state.solves.find(x => x.id === id);
       if (!s) return;
       refreshSolveDialog();
@@ -2048,12 +2416,22 @@
     };
 
     window.closeSolveDialog = () => {
+      resetDeleteButton();
       const d = document.getElementById('solve-dialog');
       if (d?.open) d.close();
     };
 
     window.deleteSelectedSolve = () => {
       if (state.selectedSolveId == null) return;
+      const btn = document.getElementById('btn-delete-solve');
+      if (btn && !btn.dataset.confirming) {
+        btn.dataset.confirming = '1';
+        btn.textContent = 'Tap again to delete';
+        clearTimeout(state.deleteConfirmTimer);
+        state.deleteConfirmTimer = setTimeout(resetDeleteButton, 3000);
+        return;
+      }
+      resetDeleteButton();
       state.solves = state.solves.filter(s => s.id !== state.selectedSolveId);
       saveSolves();
       renderMainStats();
