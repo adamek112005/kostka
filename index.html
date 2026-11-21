@@ -604,15 +604,23 @@
     }
 
 
-    // --- Independent Three.js 3D Cube Preview (State-Driven) ---
+    // --- Move-Based Three.js 3D Cube Animation ---
     const threeCube = (() => {
       let scene = null, camera = null, renderer = null, rootGroup = null;
       let cubies = [];
       let animId = null;
       let initialized = false;
-      let lastAppliedFacelets = SOLVED_FACELETS;
-      let transition = null;
-      let queuedState = null;
+      let activeStep = null;
+      let stepQueue = [];
+      let pendingGroup = null;
+      let pendingTimer = null;
+      let lastSerial = null;
+      let lastMovePerf = 0;
+
+      const MAX_QUEUE = 16;
+      const SINGLE_DURATION = 0.09;
+      const SIMULTANEOUS_DURATION = 0.095;
+      const GROUP_WINDOW_MS = 35;
 
       const COLORS = {
         U: 0xf8fafc,
@@ -620,8 +628,16 @@
         R: 0xef4444,
         L: 0xf97316,
         F: 0x22c55e,
-        B: 0x3b82f6,
-        core: 0x0f172a
+        B: 0x3b82f6
+      };
+
+      const FACE_ROT = {
+        U: { axis: new THREE.Vector3(0, 1, 0), sign: -1, pred: c => c.position.y > 0.5 },
+        D: { axis: new THREE.Vector3(0, 1, 0), sign: 1,  pred: c => c.position.y < -0.5 },
+        R: { axis: new THREE.Vector3(1, 0, 0), sign: -1, pred: c => c.position.x > 0.5 },
+        L: { axis: new THREE.Vector3(1, 0, 0), sign: 1,  pred: c => c.position.x < -0.5 },
+        F: { axis: new THREE.Vector3(0, 0, 1), sign: -1, pred: c => c.position.z > 0.5 },
+        B: { axis: new THREE.Vector3(0, 0, 1), sign: 1,  pred: c => c.position.z < -0.5 }
       };
 
       function createStickerGeometry(size, radius) {
@@ -646,48 +662,53 @@
         roughness: 0.32,
         metalness: 0.08
       });
+      const stickerMats = {
+        U: new THREE.MeshStandardMaterial({ color: COLORS.U, roughness: 0.28, metalness: 0.04 }),
+        D: new THREE.MeshStandardMaterial({ color: COLORS.D, roughness: 0.28, metalness: 0.04 }),
+        R: new THREE.MeshStandardMaterial({ color: COLORS.R, roughness: 0.28, metalness: 0.04 }),
+        L: new THREE.MeshStandardMaterial({ color: COLORS.L, roughness: 0.28, metalness: 0.04 }),
+        F: new THREE.MeshStandardMaterial({ color: COLORS.F, roughness: 0.28, metalness: 0.04 }),
+        B: new THREE.MeshStandardMaterial({ color: COLORS.B, roughness: 0.28, metalness: 0.04 })
+      };
 
-      function addSticker(parent, colorHex, pos, rot) {
-        const mat = new THREE.MeshStandardMaterial({
-          color: colorHex,
-          roughness: 0.28,
-          metalness: 0.04
-        });
-        const sticker = new THREE.Mesh(sharedStickerGeo, mat);
+      function addSticker(parent, faceKey, pos, rot) {
+        const sticker = new THREE.Mesh(sharedStickerGeo, stickerMats[faceKey]);
         sticker.position.set(pos[0], pos[1], pos[2]);
         sticker.rotation.set(rot[0], rot[1], rot[2]);
-        sticker.userData.dir = pos.map(v => Math.sign(v));
-        sticker.userData.origHex = colorHex;
         parent.add(sticker);
       }
 
       function createCubie(x, y, z) {
-        const gap = 1.0;
         const group = new THREE.Group();
-        const body = new THREE.Mesh(sharedBodyGeo, bodyMat);
-        group.add(body);
-
+        group.add(new THREE.Mesh(sharedBodyGeo, bodyMat));
         const offset = 0.495;
-        if (x === 1)  addSticker(group, COLORS.R, [offset, 0, 0], [0, Math.PI / 2, 0]);
-        if (x === -1) addSticker(group, COLORS.L, [-offset, 0, 0], [0, -Math.PI / 2, 0]);
-        if (y === 1)  addSticker(group, COLORS.U, [0, offset, 0], [-Math.PI / 2, 0, 0]);
-        if (y === -1) addSticker(group, COLORS.D, [0, -offset, 0], [Math.PI / 2, 0, 0]);
-        if (z === 1)  addSticker(group, COLORS.F, [0, 0, offset], [0, 0, 0]);
-        if (z === -1) addSticker(group, COLORS.B, [0, 0, -offset], [0, Math.PI, 0]);
-
-        group.position.set(x * gap, y * gap, z * gap);
-        group.userData.home = [x, y, z];
+        if (x === 1)  addSticker(group, 'R', [offset, 0, 0], [0, Math.PI / 2, 0]);
+        if (x === -1) addSticker(group, 'L', [-offset, 0, 0], [0, -Math.PI / 2, 0]);
+        if (y === 1)  addSticker(group, 'U', [0, offset, 0], [-Math.PI / 2, 0, 0]);
+        if (y === -1) addSticker(group, 'D', [0, -offset, 0], [Math.PI / 2, 0, 0]);
+        if (z === 1)  addSticker(group, 'F', [0, 0, offset], [0, 0, 0]);
+        if (z === -1) addSticker(group, 'B', [0, 0, -offset], [0, Math.PI, 0]);
+        group.position.set(x, y, z);
         return group;
+      }
+
+      function clearPendingTimer() {
+        if (pendingTimer) {
+          clearTimeout(pendingTimer);
+          pendingTimer = null;
+        }
       }
 
       function rebuildCubies() {
         if (!rootGroup) return;
+        clearPendingTimer();
+        pendingGroup = null;
+        stepQueue = [];
+        activeStep = null;
         while (rootGroup.children.length > 0) {
           rootGroup.remove(rootGroup.children[0]);
         }
         cubies = [];
-        transition = null;
-        queuedState = null;
         for (let x = -1; x <= 1; x++) {
           for (let y = -1; y <= 1; y++) {
             for (let z = -1; z <= 1; z++) {
@@ -697,6 +718,124 @@
             }
           }
         }
+      }
+
+      function snapCubie(c) {
+        c.position.set(
+          Math.round(c.position.x),
+          Math.round(c.position.y),
+          Math.round(c.position.z)
+        );
+        // Snap orientation to nearest 90-degree multiple to prevent floating-point drift
+        const m = new THREE.Matrix4().makeRotationFromQuaternion(c.quaternion);
+        const e = m.elements;
+        for (let i = 0; i < 16; i++) {
+          if (i === 12 || i === 13 || i === 14) continue;
+          const v = Math.round(e[i]);
+          e[i] = v === -0 ? 0 : v;
+        }
+        c.quaternion.setFromRotationMatrix(m).normalize();
+      }
+
+      function applyTurnInstant(moveObj) {
+        const cfg = FACE_ROT[moveObj.f];
+        if (!cfg) return;
+        const totalAngle = cfg.sign * moveObj.q * (Math.PI / 2);
+        const qDelta = new THREE.Quaternion().setFromAxisAngle(cfg.axis, totalAngle);
+        for (let i = 0; i < cubies.length; i++) {
+          const c = cubies[i];
+          if (cfg.pred(c)) {
+            c.position.applyQuaternion(qDelta);
+            c.quaternion.premultiply(qDelta);
+            snapCubie(c);
+          }
+        }
+      }
+
+      function buildStep(moves) {
+        const items = moves.map(mObj => {
+          const cfg = FACE_ROT[mObj.f];
+          const targets = [];
+          for (let i = 0; i < cubies.length; i++) {
+            if (cfg.pred(cubies[i])) targets.push(cubies[i]);
+          }
+          return {
+            axis: cfg.axis,
+            totalAngle: cfg.sign * mObj.q * (Math.PI / 2),
+            appliedAngle: 0,
+            targets
+          };
+        });
+        const isSimul = items.length > 1;
+        return {
+          items,
+          elapsed: 0,
+          duration: isSimul ? SIMULTANEOUS_DURATION : SINGLE_DURATION,
+          label: moves.map(m => formatMove(m.f, m.q)).join('+')
+        };
+      }
+
+      function trimQueueIfBehind() {
+        while (stepQueue.length > MAX_QUEUE) {
+          const dropped = stepQueue.shift();
+          for (const it of dropped.items) {
+            const rem = it.totalAngle - it.appliedAngle;
+            if (rem !== 0) {
+              const qRem = new THREE.Quaternion().setFromAxisAngle(it.axis, rem);
+              for (const c of it.targets) {
+                c.position.applyQuaternion(qRem);
+                c.quaternion.premultiply(qRem);
+                snapCubie(c);
+              }
+            }
+          }
+          dbg('3D queue trimmed ' + dropped.label + ' q=' + stepQueue.length);
+        }
+      }
+
+      function enqueueStep(moves, isSimul) {
+        if (!moves.length) return;
+        if (!initialized) {
+          for (const m of moves) applyTurnInstant(m);
+          return;
+        }
+        const step = buildStep(moves);
+        if (isSimul) {
+          dbg('3D simul group ' + step.label + ' q=' + stepQueue.length);
+        }
+        if (!activeStep && stepQueue.length === 0) {
+          activeStep = step;
+          dbg('3D start ' + step.label + ' q=0');
+        } else {
+          stepQueue.push(step);
+          trimQueueIfBehind();
+          dbg('3D queued ' + step.label + ' q=' + stepQueue.length);
+        }
+      }
+
+      function flushPendingGroup() {
+        clearPendingTimer();
+        if (!pendingGroup) return;
+        const g = pendingGroup;
+        pendingGroup = null;
+        enqueueStep(g.moves, g.moves.length > 1);
+      }
+
+      function canGroupWithPending(pending, moveObj, serial, nowPerf) {
+        if (!pending || !pending.moves.length) return false;
+        const dt = nowPerf - pending.lastPerf;
+        if (dt > GROUP_WINDOW_MS) return false;
+        const serialAdjacent = (
+          typeof serial === 'number' && Number.isFinite(serial) &&
+          typeof pending.lastSerial === 'number' && Number.isFinite(pending.lastSerial) &&
+          (serial - pending.lastSerial === 1 || serial === pending.lastSerial)
+        );
+        if (!serialAdjacent && dt > 22) return false;
+        // Opposite faces on same axis can rotate simultaneously without overlapping cubies
+        const ax = axisOfFace(moveObj.f);
+        if (ax < 0 || pending.axis !== ax) return false;
+        const alreadyHasFace = pending.moves.some(x => x.f === moveObj.f);
+        return !alreadyHasFace && pending.moves.length < 2;
       }
 
       function init() {
@@ -772,201 +911,26 @@
         renderer.setSize(w, h);
       }
 
-      function faceletColorAt(decoded, x, y, z, nx, ny, nz) {
-        for (const s of decoded.stickers) {
-          if (s.p[0] === x && s.p[1] === y && s.p[2] === z &&
-              s.n[0] === nx && s.n[1] === ny && s.n[2] === nz) {
-            return COLORS[s.color] ?? COLORS.core;
-          }
-        }
-        return COLORS.core;
-      }
-
-      function computePieceTransforms(decoded) {
-        const homeCoords = [];
-        for (let x = -1; x <= 1; x++) {
-          for (let y = -1; y <= 1; y++) {
-            for (let z = -1; z <= 1; z++) {
-              if (x !== 0 || y !== 0 || z !== 0) {
-                homeCoords.push([x, y, z]);
-              }
+      function finishActiveStep() {
+        if (!activeStep) return;
+        for (const it of activeStep.items) {
+          const rem = it.totalAngle - it.appliedAngle;
+          if (rem !== 0) {
+            const qRem = new THREE.Quaternion().setFromAxisAngle(it.axis, rem);
+            for (const c of it.targets) {
+              c.position.applyQuaternion(qRem);
+              c.quaternion.premultiply(qRem);
             }
           }
+          for (const c of it.targets) snapCubie(c);
         }
-        const rotMatrices = [];
-        const axes = [
-          new THREE.Vector3(1, 0, 0),
-          new THREE.Vector3(0, 1, 0),
-          new THREE.Vector3(0, 0, 1)
-        ];
-        const seen = new Set();
-        for (let ix = 0; ix < 4; ix++) {
-          for (let iy = 0; iy < 4; iy++) {
-            for (let iz = 0; iz < 4; iz++) {
-              const q = new THREE.Quaternion()
-                .setFromAxisAngle(axes[0], ix * Math.PI / 2)
-                .premultiply(new THREE.Quaternion().setFromAxisAngle(axes[1], iy * Math.PI / 2))
-                .premultiply(new THREE.Quaternion().setFromAxisAngle(axes[2], iz * Math.PI / 2));
-              const mat = new THREE.Matrix4().makeRotationFromQuaternion(q);
-              const key = mat.elements.map(v => Math.round(v * 100)).join(',');
-              if (!seen.has(key)) {
-                seen.add(key);
-                rotMatrices.push({ mat, quat: q });
-              }
-            }
-          }
+        const doneLabel = activeStep.label;
+        activeStep = null;
+        dbg('3D done ' + doneLabel + ' q=' + stepQueue.length);
+        if (stepQueue.length > 0) {
+          activeStep = stepQueue.shift();
+          dbg('3D start ' + activeStep.label + ' q=' + stepQueue.length);
         }
-
-        const targetColorsBySlot = new Map();
-        for (const [hx, hy, hz] of homeCoords) {
-          const dirs = [];
-          if (hx === 1)  dirs.push([1, 0, 0]);
-          if (hx === -1) dirs.push([-1, 0, 0]);
-          if (hy === 1)  dirs.push([0, 1, 0]);
-          if (hy === -1) dirs.push([0, -1, 0]);
-          if (hz === 1)  dirs.push([0, 0, 1]);
-          if (hz === -1) dirs.push([0, 0, -1]);
-          const colors = dirs.map(([dx, dy, dz]) => faceletColorAt(decoded, hx, hy, hz, dx, dy, dz));
-          targetColorsBySlot.set(`${hx},${hy},${hz}`, { dirs, colors });
-        }
-
-        const usedCubies = new Set();
-        const result = cubies.map(() => ({
-          pos: new THREE.Vector3(),
-          quat: new THREE.Quaternion(),
-          colors: []
-        }));
-
-        for (const [tx, ty, tz] of homeCoords) {
-          const slotInfo = targetColorsBySlot.get(`${tx},${ty},${tz}`);
-          let matchedIdx = -1;
-          let matchedQuat = new THREE.Quaternion();
-          let matchedColors = slotInfo.colors;
-
-          for (let ci = 0; ci < cubies.length; ci++) {
-            if (usedCubies.has(ci)) continue;
-            const c = cubies[ci];
-            const [hx, hy, hz] = c.userData.home;
-            const childStickers = c.children.filter(ch => ch.userData && ch.userData.dir);
-            if (childStickers.length !== slotInfo.dirs.length) continue;
-
-            for (const { mat, quat } of rotMatrices) {
-              const pVec = new THREE.Vector3(hx, hy, hz).applyMatrix4(mat);
-              if (Math.round(pVec.x) !== tx || Math.round(pVec.y) !== ty || Math.round(pVec.z) !== tz) continue;
-
-              let allMatch = true;
-              const orderedColors = [];
-              for (const [sdx, sdy, sdz] of slotInfo.dirs) {
-                const wantHex = faceletColorAt(decoded, tx, ty, tz, sdx, sdy, sdz);
-                let foundHex = null;
-                for (const ch of childStickers) {
-                  const wDir = new THREE.Vector3(...ch.userData.dir).applyMatrix4(mat);
-                  if (Math.round(wDir.x) === sdx && Math.round(wDir.y) === sdy && Math.round(wDir.z) === sdz) {
-                    foundHex = ch.userData.origHex;
-                    break;
-                  }
-                }
-                if (foundHex !== wantHex) {
-                  allMatch = false;
-                  break;
-                }
-                orderedColors.push(wantHex);
-              }
-
-              if (allMatch) {
-                matchedIdx = ci;
-                matchedQuat = quat.clone();
-                matchedColors = orderedColors;
-                break;
-              }
-            }
-            if (matchedIdx !== -1) break;
-          }
-
-          if (matchedIdx !== -1) {
-            usedCubies.add(matchedIdx);
-            result[matchedIdx] = {
-              pos: new THREE.Vector3(tx, ty, tz),
-              quat: matchedQuat,
-              colors: matchedColors,
-              slotDirs: slotInfo.dirs
-            };
-          }
-        }
-
-        return result;
-      }
-
-      function applyStateInstant(decoded) {
-        if (!decoded || !cubies.length) return;
-        const transforms = computePieceTransforms(decoded);
-        for (let i = 0; i < cubies.length; i++) {
-          const c = cubies[i];
-          const tr = transforms[i];
-          if (!tr || !tr.slotDirs) continue;
-          c.position.copy(tr.pos);
-          c.quaternion.copy(tr.quat);
-          c.updateMatrix();
-          const childStickers = c.children.filter(ch => ch.userData && ch.userData.dir);
-          for (let s = 0; s < childStickers.length; s++) {
-            const ch = childStickers[s];
-            const [sdx, sdy, sdz] = tr.slotDirs[s];
-            const localDir = new THREE.Vector3(sdx, sdy, sdz).applyQuaternion(tr.quat.clone().invert());
-            const targetChild = childStickers.find(other =>
-              Math.round(other.userData.dir[0]) === Math.round(localDir.x) &&
-              Math.round(other.userData.dir[1]) === Math.round(localDir.y) &&
-              Math.round(other.userData.dir[2]) === Math.round(localDir.z)
-            ) || ch;
-            targetChild.material.color.setHex(tr.colors[s]);
-          }
-        }
-        lastAppliedFacelets = decoded.facelets;
-        transition = null;
-      }
-
-      function beginTransition(decoded) {
-        if (!decoded || !cubies.length) return;
-        if (decoded.facelets === lastAppliedFacelets && !transition) return;
-        if (transition) {
-          dbg('3D anim shortened for newer state');
-          applyStateInstant(transition.target);
-        }
-        const startPos = cubies.map(c => c.position.clone());
-        const startQuat = cubies.map(c => c.quaternion.clone());
-        const transforms = computePieceTransforms(decoded);
-        const targetPos = [];
-        const targetQuat = [];
-        for (let i = 0; i < cubies.length; i++) {
-          const c = cubies[i];
-          const tr = transforms[i];
-          if (!tr || !tr.slotDirs) {
-            targetPos.push(c.position.clone());
-            targetQuat.push(c.quaternion.clone());
-            continue;
-          }
-          targetPos.push(tr.pos);
-          targetQuat.push(tr.quat);
-          const childStickers = c.children.filter(ch => ch.userData && ch.userData.dir);
-          for (let s = 0; s < childStickers.length; s++) {
-            const [sdx, sdy, sdz] = tr.slotDirs[s];
-            const localDir = new THREE.Vector3(sdx, sdy, sdz).applyQuaternion(tr.quat.clone().invert());
-            const targetChild = childStickers.find(other =>
-              Math.round(other.userData.dir[0]) === Math.round(localDir.x) &&
-              Math.round(other.userData.dir[1]) === Math.round(localDir.y) &&
-              Math.round(other.userData.dir[2]) === Math.round(localDir.z)
-            );
-            if (targetChild) targetChild.material.color.setHex(tr.colors[s]);
-          }
-        }
-        transition = {
-          target: decoded,
-          elapsed: 0,
-          duration: 0.085,
-          startPos,
-          startQuat,
-          targetPos,
-          targetQuat
-        };
       }
 
       let lastFrameTime = 0;
@@ -979,40 +943,50 @@
             const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
             lastFrameTime = now;
 
-            if (transition) {
-              transition.elapsed += dt;
-              const t = Math.min(transition.elapsed / transition.duration, 1);
-              const ease = 1 - Math.pow(1 - t, 3);
-              for (let i = 0; i < cubies.length; i++) {
-                cubies[i].position.lerpVectors(transition.startPos[i], transition.targetPos[i], ease);
-                cubies[i].quaternion.slerpQuaternions(transition.startQuat[i], transition.targetQuat[i], ease);
-              }
-              if (t >= 1) {
-                const finishedTarget = transition.target;
-                applyStateInstant(finishedTarget);
-                if (queuedState) {
-                  const next = queuedState;
-                  queuedState = null;
-                  beginTransition(next);
+            if (!activeStep && stepQueue.length > 0) {
+              activeStep = stepQueue.shift();
+              dbg('3D start ' + activeStep.label + ' q=' + stepQueue.length);
+            }
+
+            if (activeStep) {
+              activeStep.elapsed += dt;
+              const t = Math.min(activeStep.elapsed / activeStep.duration, 1);
+              const eased = 1 - Math.pow(1 - t, 2);
+              for (const it of activeStep.items) {
+                const targetAngle = it.totalAngle * eased;
+                const delta = targetAngle - it.appliedAngle;
+                if (delta !== 0) {
+                  const qDelta = new THREE.Quaternion().setFromAxisAngle(it.axis, delta);
+                  for (const c of it.targets) {
+                    c.position.applyQuaternion(qDelta);
+                    c.quaternion.premultiply(qDelta);
+                  }
+                  it.appliedAngle = targetAngle;
                 }
               }
-            } else if (queuedState) {
-              const next = queuedState;
-              queuedState = null;
-              beginTransition(next);
+              if (t >= 1) {
+                finishActiveStep();
+              }
             }
 
             if (renderer && scene && camera && state.simMode === '3D') {
               renderer.render(scene, camera);
             }
           } catch (e) {
-            dbg('3D loop err ' + e);
-            transition = null;
-            queuedState = null;
+            dbg('3D anim err ' + e);
+            activeStep = null;
+            stepQueue = [];
             try {
-              const fallback = decodeFaceletsToPieceState(lastAppliedFacelets);
-              if (fallback) applyStateInstant(fallback);
-            } catch {}
+              rebuildCubies();
+              for (const mStr of state.cubeMoves) {
+                if (!/^[xyz]/i.test(mStr) && /^[URFDLB]/i.test(mStr)) {
+                  applyTurnInstant(parseMove(mStr));
+                }
+              }
+              dbg('3D recovered from moves');
+            } catch (recErr) {
+              dbg('3D recover err ' + recErr);
+            }
           }
         };
         animId = requestAnimationFrame(tick);
@@ -1029,27 +1003,60 @@
           const wrap = document.getElementById('three-wrap');
           if (wrap) wrap.style.display = 'none';
         },
-        setTargetState(decoded) {
-          if (!initialized) init();
-          if (!decoded) return;
-          if (transition) {
-            queuedState = decoded;
-            dbg('3D state queued (skipping older)');
-          } else {
-            beginTransition(decoded);
+        addMove(moveStr, evMeta) {
+          if (!moveStr || typeof moveStr !== 'string') return;
+          if (!/^[URFDLB](2|')?$/i.test(moveStr.trim())) return;
+          const mObj = parseMove(moveStr.trim());
+          const ax = axisOfFace(mObj.f);
+          if (ax < 0) return;
+
+          const nowPerf = performance.now();
+          const serial = typeof evMeta?.serial === 'number' && Number.isFinite(evMeta.serial) ? evMeta.serial : null;
+          lastSerial = serial;
+          lastMovePerf = nowPerf;
+
+          if (!initialized) {
+            applyTurnInstant(mObj);
+            return;
           }
+
+          if (pendingGroup && canGroupWithPending(pendingGroup, mObj, serial, nowPerf)) {
+            pendingGroup.moves.push(mObj);
+            pendingGroup.lastPerf = nowPerf;
+            pendingGroup.lastSerial = serial;
+            flushPendingGroup();
+            return;
+          }
+
+          if (pendingGroup) {
+            flushPendingGroup();
+          }
+
+          // Opposite face on same axis can still arrive within a tiny window without delaying single moves
+          pendingGroup = {
+            axis: ax,
+            moves: [mObj],
+            lastPerf: nowPerf,
+            lastSerial: serial
+          };
+          clearPendingTimer();
+          pendingTimer = setTimeout(() => {
+            flushPendingGroup();
+          }, 14);
         },
-        setStateInstant(decoded) {
+        replayMoves(movesList) {
           if (!initialized) init();
-          if (!decoded) return;
-          queuedState = null;
-          applyStateInstant(decoded);
+          rebuildCubies();
+          for (const item of movesList || []) {
+            const mStr = typeof item === 'string' ? item : item?.m;
+            if (mStr && !/^[xyz]/i.test(mStr) && /^[URFDLB](2|')?$/i.test(mStr.trim())) {
+              applyTurnInstant(parseMove(mStr.trim()));
+            }
+          }
         },
         reset() {
           if (!initialized) return;
           rebuildCubies();
-          const solved = decodeFaceletsToPieceState(SOLVED_FACELETS);
-          if (solved) applyStateInstant(solved);
         }
       };
     })();
@@ -1074,9 +1081,7 @@
       if (mode === '3D') {
         if (net) net.style.display = 'none';
         threeCube.show();
-        const decoded = decodeFaceletsToPieceState(state.liveFacelets);
-        if (decoded) threeCube.setStateInstant(decoded);
-        if (state.conn) requestCubeStateSync('mode-3D');
+        threeCube.replayMoves(state.cubeMoves);
       } else {
         threeCube.hide();
         if (net) net.style.display = 'block';
@@ -1620,9 +1625,6 @@
       buildScrambleBaseline(SOLVED_FACELETS);
       scheduleNetRender();
       renderScramble();
-      if (state.conn && !state.P.length) {
-        cubeCmd({ type: "REQUEST_FACELETS" });
-      }
     }
 
     function updateTimerDisplay() {
@@ -1643,78 +1645,6 @@
       return Object.values(counts).every(c => c === 9);
     }
 
-    function decodeFaceletsToPieceState(facelets) {
-      if (!isValidFacelets(facelets)) return null;
-      const centers = {
-        U: facelets[4],
-        R: facelets[13],
-        F: facelets[22],
-        D: facelets[31],
-        L: facelets[40],
-        B: facelets[49]
-      };
-      const slotFaces = {
-        U: 'U', R: 'R', F: 'F', D: 'D', L: 'L', B: 'B'
-      };
-      const stickers = [];
-      for (let fIdx = 0; fIdx < 6; fIdx++) {
-        const fChar = slotFaces[FACE_L[fIdx]];
-        for (let k = 0; k < 9; k++) {
-          const r = Math.floor(k / 3);
-          const c = k % 3;
-          let p, n;
-          if (fIdx === 0)      { p = [c - 1, 1, r - 1];  n = [0, 1, 0]; }
-          else if (fIdx === 1) { p = [1, 1 - r, 1 - c];  n = [1, 0, 0]; }
-          else if (fIdx === 2) { p = [c - 1, 1 - r, 1];  n = [0, 0, 1]; }
-          else if (fIdx === 3) { p = [c - 1, -1, 1 - r]; n = [0, -1, 0]; }
-          else if (fIdx === 4) { p = [-1, 1 - r, c - 1]; n = [-1, 0, 0]; }
-          else                 { p = [1 - c, 1 - r, -1]; n = [0, 0, -1]; }
-          stickers.push({ p, n, color: facelets[fIdx * 9 + k] });
-        }
-      }
-      return { facelets, centers, stickers };
-    }
-
-    function requestCubeStateSync(reason) {
-      if (!state.conn || state.faceletsPending) return;
-      state.faceletsPending = true;
-      dbg('3D req state (' + (reason || 'sync') + ')');
-      clearTimeout(state.faceletsPendingTimer);
-      state.faceletsPendingTimer = setTimeout(() => {
-        state.faceletsPending = false;
-      }, 1500);
-      cubeCmd({ type: "REQUEST_FACELETS" });
-    }
-
-    function syncCubeState(facelets, opts = {}) {
-      if (!isValidFacelets(facelets)) {
-        dbg('3D state invalid');
-        return false;
-      }
-      dbg('3D state valid');
-      const decoded = decodeFaceletsToPieceState(facelets);
-      if (!decoded) {
-        dbg('3D decode err');
-        return false;
-      }
-      state.liveFacelets = facelets;
-      dbg('3D internal state updated');
-      scheduleNetRender();
-      if (state.simMode === '3D') {
-        try {
-          if (opts.instant) {
-            threeCube.setStateInstant(decoded);
-          } else {
-            threeCube.setTargetState(decoded);
-          }
-          dbg('3D model synced');
-        } catch (e) {
-          dbg('3D sync err ' + e);
-        }
-      }
-      return true;
-    }
-
     function handleMove(move, evMeta) {
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
@@ -1726,14 +1656,10 @@
 
       let isSolved = false;
       if (!/^[xyz]/i.test(str)) {
-        const nextFacelets = applyFaceletMove(state.liveFacelets, str);
-        isSolved = nextFacelets === SOLVED_FACELETS;
-        if (!state.conn) {
-          syncCubeState(nextFacelets, { instant: false });
-        } else {
-          state.liveFacelets = nextFacelets;
-          scheduleNetRender();
-        }
+        state.liveFacelets = applyFaceletMove(state.liveFacelets, str);
+        isSolved = state.liveFacelets === SOLVED_FACELETS;
+        scheduleNetRender();
+        threeCube.addMove(str, evMeta);
       }
 
       try {
@@ -1942,31 +1868,7 @@
           } else if (ev.type === "FACELETS") {
             state.faceletsPending = false;
             clearTimeout(state.faceletsPendingTimer);
-            dbg("FACELETS recv");
-            if (isValidFacelets(ev.facelets)) {
-              const matched = ev.facelets === state.liveFacelets;
-              dbg(matched ? "FACELETS match" : "FACELETS differ");
-              const now = performance.now();
-              let adopted = false;
-              if (!matched && (now - state.lastMoveAt >= 150 || state.simMode === '3D')) {
-                adopted = syncCubeState(ev.facelets, { instant: false });
-                if (adopted) dbg("resync adopted");
-              } else if (state.simMode === '3D') {
-                syncCubeState(ev.facelets, { instant: false });
-              }
-              if (state.trackingActive && state.timerState === 'IDLE') {
-                if (adopted && !state.P.length) {
-                  buildScrambleBaseline(state.liveFacelets);
-                }
-                afterScrambleProgress();
-              }
-              if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
-                syncCubeState(SOLVED_FACELETS, { instant: false });
-                checkSolvedAndFinish(state.lastMoveAt || now);
-              }
-            } else {
-              dbg("FACELETS invalid");
-            }
+            dbg("FACELETS ignored (move-based state)");
           } else if (ev.type === "BATTERY") {
             const bat = document.getElementById('battery-pill');
             if (bat) bat.textContent = `Battery: ${ev.batteryLevel}%`;
@@ -1986,7 +1888,6 @@
         });
 
         dbg("BT connected");
-        requestCubeStateSync("connect");
         await cubeCmd({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
