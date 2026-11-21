@@ -610,9 +610,8 @@
       let cubies = [];
       let animId = null;
       let initialized = false;
-      let activeGroup = null;
+      let activeTurn = null;
       const queue = [];
-      const MAX_QUEUE = 12;
 
       const COLORS = {
         U: 0xf8fafc,
@@ -677,29 +676,13 @@
         return group;
       }
 
-      function clearActiveGroup() {
-        if (!activeGroup) return;
-        for (const item of activeGroup.items) {
-          try {
-            if (item.pivot && rootGroup) rootGroup.remove(item.pivot);
-            for (const c of item.moving) {
-              if (item.pivot) item.pivot.remove(c);
-              if (rootGroup && !rootGroup.children.includes(c)) rootGroup.add(c);
-            }
-          } catch (e) {
-            dbg('3D cleanup err ' + e);
-          }
-        }
-        activeGroup = null;
-      }
-
       function rebuildCubies() {
         if (!rootGroup) return;
-        clearActiveGroup();
         while (rootGroup.children.length > 0) {
           rootGroup.remove(rootGroup.children[0]);
         }
         cubies = [];
+        activeTurn = null;
         queue.length = 0;
         for (let x = -1; x <= 1; x++) {
           for (let y = -1; y <= 1; y++) {
@@ -811,105 +794,56 @@
         return { axis, layer, angle: dir * turns * (Math.PI / 2) };
       }
 
-      function canCombineSpecs(existingSpecs, candidateSpec) {
-        if (!candidateSpec) return false;
-        if (candidateSpec.layer === null) return existingSpecs.length === 0;
-        for (const s of existingSpecs) {
-          if (s.layer === null) return false;
-          if (s.axis === candidateSpec.axis && s.layer === candidateSpec.layer) return false;
-        }
-        return true;
-      }
-
-      function applySpecInstant(spec) {
+      function beginNextTurn() {
+        if (activeTurn || queue.length === 0) return;
+        const spec = queue.shift();
         const pivot = new THREE.Group();
-        pivot.rotation[spec.axis] = spec.angle;
-        pivot.updateMatrix();
+        pivot.rotation.set(0, 0, 0);
+        rootGroup.add(pivot);
+
+        const moving = [];
         for (const c of cubies) {
-          const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.0);
-          if (spec.layer === null || coord === spec.layer) {
-            c.applyMatrix4(pivot.matrix);
-            c.position.set(
-              Math.round(c.position.x / 1.0) * 1.0,
-              Math.round(c.position.y / 1.0) * 1.0,
-              Math.round(c.position.z / 1.0) * 1.0
-            );
-            const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-            const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-            c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+          if (spec.layer === null) {
+            moving.push(c);
+          } else {
+            const coord = Math.round(c.position[spec.axis] / 1.0);
+            if (coord === spec.layer) moving.push(c);
           }
         }
-      }
-
-      function syncInstantToCubeMoves() {
-        rebuildCubies();
-        for (const mv of state.cubeMoves) {
-          const spec = parseMoveSpec(mv);
-          if (spec) applySpecInstant(spec);
+        for (const c of moving) {
+          rootGroup.remove(c);
+          pivot.add(c);
         }
-      }
-
-      function beginNextGroup() {
-        if (activeGroup || queue.length === 0) return;
-        const specs = queue.shift();
-        if (!Array.isArray(specs) || specs.length === 0) return;
-        const items = [];
-        for (const spec of specs) {
-          const pivot = new THREE.Group();
-          pivot.rotation.set(0, 0, 0);
-          rootGroup.add(pivot);
-          const moving = [];
-          for (const c of cubies) {
-            if (spec.layer === null) {
-              moving.push(c);
-            } else {
-              const coord = Math.round(c.position[spec.axis] / 1.0);
-              if (coord === spec.layer) moving.push(c);
-            }
-          }
-          for (const c of moving) {
-            rootGroup.remove(c);
-            pivot.add(c);
-          }
-          items.push({
-            axis: spec.axis,
-            targetAngle: spec.angle,
-            currentAngle: 0,
-            pivot,
-            moving
-          });
-        }
-        activeGroup = {
-          label: specs.map(s => s.label || s.axis).join('+'),
-          items
+        activeTurn = {
+          axis: spec.axis,
+          targetAngle: spec.angle,
+          currentAngle: 0,
+          pivot,
+          moving
         };
-        dbg('3D anim start ' + activeGroup.label);
       }
 
-      function finishActiveGroup() {
-        if (!activeGroup) return;
-        const finishedLabel = activeGroup.label;
-        for (const item of activeGroup.items) {
-          const { axis, targetAngle, pivot, moving } = item;
-          pivot.rotation[axis] = targetAngle;
-          pivot.updateMatrixWorld();
-          for (const c of moving) {
-            c.applyMatrix4(pivot.matrix);
-            c.position.set(
-              Math.round(c.position.x / 1.0) * 1.0,
-              Math.round(c.position.y / 1.0) * 1.0,
-              Math.round(c.position.z / 1.0) * 1.0
-            );
-            const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-            const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-            c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-            pivot.remove(c);
-            rootGroup.add(c);
-          }
-          rootGroup.remove(pivot);
+      function finishActiveTurn() {
+        if (!activeTurn) return;
+        const { axis, targetAngle, pivot, moving } = activeTurn;
+        pivot.rotation[axis] = targetAngle;
+        pivot.updateMatrixWorld();
+        for (const c of moving) {
+          c.applyMatrix4(pivot.matrix);
+          c.position.set(
+            Math.round(c.position.x / 1.0) * 1.0,
+            Math.round(c.position.y / 1.0) * 1.0,
+            Math.round(c.position.z / 1.0) * 1.0
+          );
+          const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
+          const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
+          c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+          pivot.remove(c);
+          rootGroup.add(c);
         }
-        activeGroup = null;
-        dbg('3D anim done ' + finishedLabel);
+        rootGroup.remove(pivot);
+        activeTurn = null;
+        beginNextTurn();
       }
 
       let lastFrameTime = 0;
@@ -918,50 +852,25 @@
         lastFrameTime = performance.now();
         const tick = (now) => {
           animId = requestAnimationFrame(tick);
-          try {
-            const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
-            lastFrameTime = now;
+          const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
+          lastFrameTime = now;
 
-            if (!activeGroup && queue.length > 0) {
-              beginNextGroup();
+          if (!activeTurn && queue.length > 0) {
+            beginNextTurn();
+          }
+          if (activeTurn) {
+            const speed = 14 * (1 + queue.length);
+            const step = Math.sign(activeTurn.targetAngle) * speed * dt;
+            const nextAngle = activeTurn.currentAngle + step;
+            if (Math.abs(nextAngle) >= Math.abs(activeTurn.targetAngle)) {
+              finishActiveTurn();
+            } else {
+              activeTurn.currentAngle = nextAngle;
+              activeTurn.pivot.rotation[activeTurn.axis] = nextAngle;
             }
-            if (activeGroup) {
-              const speed = 14 * (1 + queue.length);
-              let allDone = true;
-              for (const item of activeGroup.items) {
-                const step = Math.sign(item.targetAngle) * speed * dt;
-                const nextAngle = item.currentAngle + step;
-                if (Math.abs(nextAngle) >= Math.abs(item.targetAngle)) {
-                  item.currentAngle = item.targetAngle;
-                  item.pivot.rotation[item.axis] = item.targetAngle;
-                } else {
-                  item.currentAngle = nextAngle;
-                  item.pivot.rotation[item.axis] = nextAngle;
-                  allDone = false;
-                }
-              }
-              if (allDone) {
-                finishActiveGroup();
-                if (!activeGroup && queue.length > 0) {
-                  beginNextGroup();
-                }
-              }
-            }
-            if (renderer && scene && camera && state.simMode === '3D') {
-              renderer.render(scene, camera);
-            }
-          } catch (e) {
-            dbg('3D loop err ' + e + ' -> recover');
-            clearActiveGroup();
-            queue.length = 0;
-            try {
-              syncInstantToCubeMoves();
-              if (renderer && scene && camera && state.simMode === '3D') {
-                renderer.render(scene, camera);
-              }
-            } catch (recErr) {
-              dbg('3D recover err ' + recErr);
-            }
+          }
+          if (renderer && scene && camera && state.simMode === '3D') {
+            renderer.render(scene, camera);
           }
         };
         animId = requestAnimationFrame(tick);
@@ -978,33 +887,12 @@
           const wrap = document.getElementById('three-wrap');
           if (wrap) wrap.style.display = 'none';
         },
-        addMoveGroup(moveStrs) {
-          if (!Array.isArray(moveStrs) || moveStrs.length === 0) return;
-          if (!initialized) init();
-          const combined = [];
-          for (const mv of moveStrs) {
-            const spec = parseMoveSpec(mv);
-            if (!spec) continue;
-            spec.label = String(mv).trim();
-            if (canCombineSpecs(combined, spec)) {
-              combined.push(spec);
-            } else {
-              if (combined.length) queue.push(combined.splice(0));
-              combined.push(spec);
-            }
-          }
-          if (combined.length) queue.push(combined);
-          while (queue.length > MAX_QUEUE) {
-            const dropped = queue.shift();
-            if (Array.isArray(dropped)) {
-              for (const s of dropped) applySpecInstant(s);
-            }
-            dbg('3D queue cap flush');
-          }
-          if (!activeGroup) beginNextGroup();
-        },
         addMove(moveStr) {
-          this.addMoveGroup([moveStr]);
+          const spec = parseMoveSpec(moveStr);
+          if (!spec) return;
+          if (!initialized) init();
+          queue.push(spec);
+          if (!activeTurn) beginNextTurn();
         },
         reset() {
           if (!initialized) return;
@@ -1016,7 +904,23 @@
           for (const mv of movesList) {
             const spec = parseMoveSpec(mv);
             if (!spec) continue;
-            applySpecInstant(spec);
+            const pivot = new THREE.Group();
+            pivot.rotation[spec.axis] = spec.angle;
+            pivot.updateMatrix();
+            for (const c of cubies) {
+              const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.0);
+              if (spec.layer === null || coord === spec.layer) {
+                c.applyMatrix4(pivot.matrix);
+                c.position.set(
+                  Math.round(c.position.x / 1.0) * 1.0,
+                  Math.round(c.position.y / 1.0) * 1.0,
+                  Math.round(c.position.z / 1.0) * 1.0
+                );
+                const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
+                const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
+                c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+              }
+            }
           }
         }
       };
@@ -1599,86 +1503,12 @@
       state.rafId = requestAnimationFrame(updateTimerDisplay);
     }
 
-    let pendingSimulGroup = null;
-    let pendingSimulTimer = null;
-
-    function flushPendingSimulGroup() {
-      if (pendingSimulTimer) {
-        clearTimeout(pendingSimulTimer);
-        pendingSimulTimer = null;
-      }
-      if (!pendingSimulGroup || pendingSimulGroup.moves.length === 0) {
-        pendingSimulGroup = null;
-        return;
-      }
-      const batch = pendingSimulGroup.moves.slice();
-      pendingSimulGroup = null;
-      if (batch.length > 1) {
-        dbg('SIMUL group [' + batch.join(', ') + ']');
-      }
-      try {
-        if (state.simMode === '3D') {
-          threeCube.addMoveGroup(batch);
-        }
-      } catch (e) {
-        dbg('3D group err ' + e);
-        try {
-          threeCube.applyMovesInstant(state.cubeMoves);
-        } catch {}
-      }
-    }
-
-    function scheduleThreeMove(str, evSerial, now) {
-      if (state.simMode !== '3D') return;
-      const spec = (() => {
-        const m = String(str).trim().match(/^([URFDLBXYZ])(2|')?$/i);
-        if (!m) return null;
-        const face = m[1].toUpperCase();
-        const axis = (face === 'U' || face === 'D' || face === 'Y') ? 'y'
-          : ((face === 'R' || face === 'L' || face === 'X') ? 'x' : 'z');
-        const layer = (face === 'U' || face === 'R' || face === 'F') ? 1
-          : ((face === 'D' || face === 'L' || face === 'B') ? -1 : null);
-        return { axis, layer };
-      })();
-      if (!spec || spec.layer === null) {
-        flushPendingSimulGroup();
-        threeCube.addMoveGroup([str]);
-        return;
-      }
-      const serialNum = typeof evSerial === 'number' ? evSerial : null;
-      const canMerge = pendingSimulGroup
-        && (now - pendingSimulGroup.at) <= 25
-        && (serialNum === null || pendingSimulGroup.serial === null || Math.abs(serialNum - pendingSimulGroup.serial) <= 1)
-        && pendingSimulGroup.moves.every(prevStr => {
-          const pm = String(prevStr).trim().match(/^([URFDLBXYZ])(2|')?$/i);
-          if (!pm) return false;
-          const pf = pm[1].toUpperCase();
-          const pAxis = (pf === 'U' || pf === 'D' || pf === 'Y') ? 'y'
-            : ((pf === 'R' || pf === 'L' || pf === 'X') ? 'x' : 'z');
-          const pLayer = (pf === 'U' || pf === 'R' || pf === 'F') ? 1
-            : ((pf === 'D' || pf === 'L' || pf === 'B') ? -1 : null);
-          return pLayer !== null && !(pAxis === spec.axis && pLayer === spec.layer);
-        });
-      if (canMerge) {
-        pendingSimulGroup.moves.push(str);
-        pendingSimulGroup.at = now;
-        if (serialNum !== null) pendingSimulGroup.serial = serialNum;
-        clearTimeout(pendingSimulTimer);
-        pendingSimulTimer = setTimeout(flushPendingSimulGroup, 12);
-      } else {
-        flushPendingSimulGroup();
-        pendingSimulGroup = { moves: [str], at: now, serial: serialNum };
-        pendingSimulTimer = setTimeout(flushPendingSimulGroup, 12);
-      }
-    }
-
-    function handleMove(move, evMeta) {
+    function handleMove(move) {
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
       state.cubeMoves.push(str);
 
-      const rawTs = typeof evMeta?.timestamp === 'number' && Number.isFinite(evMeta.timestamp) ? evMeta.timestamp : null;
-      const now = rawTs !== null ? rawTs : performance.now();
+      const now = performance.now();
       state.lastMoveAt = now;
 
       let isSolved = false;
@@ -1689,9 +1519,11 @@
       }
 
       try {
-        scheduleThreeMove(str, evMeta?.serial, now);
+        if (state.simMode === '3D') {
+          threeCube.addMove(str);
+        }
       } catch (e) {
-        dbg('3D schedule err ' + e);
+        console.error(e);
       }
 
       try {
@@ -1706,7 +1538,6 @@
           state.timerState = 'RUNNING';
           state.startTime = now;
           state.moves = [{ m: str, t: 0 }];
-          dbg('TIMER start ' + str + ' seq=' + state.solveSeq);
           const val = document.getElementById('timer-val');
           if (val) {
             val.className = 'timer running';
@@ -1883,9 +1714,8 @@
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
-            const mvStr = typeof ev.move === 'string' ? ev.move : (ev.move?.move || ev.move?.latestAlgLeaf?.toString() || '');
-            dbg("MOVE " + mvStr + " serial " + ev.serial);
-            handleMove(ev.move, ev);
+            dbg("MOVE " + ev.move + " serial " + ev.serial);
+            handleMove(ev.move);
             clearTimeout(state.faceletsDebounce);
             state.faceletsDebounce = setTimeout(() => {
               if (state.conn && !state.faceletsPending) {
