@@ -544,6 +544,9 @@
       targetFacelets: SOLVED_FACELETS,
       cubeMoves: [],
       timerState: 'IDLE',
+      solveCompleting: false,
+      solveSeq: 0,
+      lastFinishedSeq: -1,
       startTime: 0,
       rafId: null,
       scrambles: [],
@@ -553,6 +556,7 @@
       tokenGroup: [],
       S: [],
       P: [],
+      prefix: [],
       trackingActive: false,
       moves: [],
       solves: []
@@ -1035,8 +1039,10 @@
           const edge = edges.find(e => e.map(faceOf).sort().join('') === adjFaces);
           if (!edge) continue;
           const stickers = [...corner, ...edge];
+          const colors = cFaces.filter(x => x !== C);
           slots.push({
             stickers,
+            colors,
             check: f => stickers.every(i => f[i] === faceOf(i))
           });
         }
@@ -1097,7 +1103,7 @@
         const step = { kind, done: end >= 0 };
         if (kind === 'slot') {
           const s = k <= slotOrder.length ? slots[slotOrder[k - 1]] : null;
-          if (s) step.colors = [faceOf(s.stickers[1]), faceOf(s.stickers[2])];
+          if (s) step.colors = s.colors.slice();
           step.label = 'Slot ' + k;
         } else if (kind === 'cross') {
           step.label = 'Cross';
@@ -1348,6 +1354,9 @@
     }
 
     function armTimer() {
+      if (state.timerState === 'ARMED' || state.timerState === 'RUNNING') return;
+      state.solveCompleting = false;
+      state.solveSeq++;
       state.timerState = 'ARMED';
       state.moves = [];
       const val = document.getElementById('timer-val');
@@ -1378,20 +1387,48 @@
       }
     }
 
-    function syncScrambleToFacelets() {
-      if (!state.trackingActive || state.timerState !== 'IDLE') return false;
-      for (let j = state.S.length; j >= 0; j--) {
-        if (state.liveFacelets === state.prefix[j]) {
-          state.P = state.S.slice(0, j).map(g => ({ axis: g.axis, q: { ...g.q } }));
-          return true;
-        }
+    function buildScrambleBaseline(baseFacelets) {
+      const base = (typeof baseFacelets === 'string' && baseFacelets.length === 54) ? baseFacelets : SOLVED_FACELETS;
+      let target = base;
+      for (const tok of state.rawTokens) {
+        target = applyFaceletMove(target, tok);
       }
-      return false;
+      state.targetFacelets = target;
+      const prefix = [base];
+      let pf = base;
+      for (let gi = 0; gi < state.S.length; gi++) {
+        state.rawTokens.forEach((tok, i) => {
+          if (state.tokenGroup[i] === gi) pf = applyFaceletMove(pf, tok);
+        });
+        prefix.push(pf);
+      }
+      state.prefix = prefix;
+    }
+
+    function syncScrambleToFacelets() {
+      try {
+        if (!state.trackingActive || state.timerState !== 'IDLE') return false;
+        if (!Array.isArray(state.prefix) || state.prefix.length !== state.S.length + 1) return false;
+        for (let j = state.S.length; j >= 0; j--) {
+          if (state.liveFacelets === state.prefix[j]) {
+            state.P = state.S.slice(0, j).map(g => ({ axis: g.axis, q: { ...g.q } }));
+            return true;
+          }
+        }
+        return false;
+      } catch (e) {
+        console.error(e);
+        return false;
+      }
     }
 
     function afterScrambleProgress() {
+      if (!state.trackingActive || state.timerState !== 'IDLE') return;
       syncScrambleToFacelets();
-      if (state.liveFacelets === state.targetFacelets) {
+      const { k, rest } = evalScrambleMatch();
+      const moveDone = k === state.S.length && rest.length === 0;
+      const faceletDone = Boolean(state.targetFacelets) && state.liveFacelets === state.targetFacelets;
+      if (moveDone || faceletDone) {
         state.trackingActive = false;
         scheduleNetRender();
         renderScramble();
@@ -1404,6 +1441,7 @@
     }
 
     function onScrambleMove(m) {
+      if (!state.trackingActive || state.timerState !== 'IDLE') return;
       applyMoveToP(m);
       afterScrambleProgress();
     }
@@ -1429,21 +1467,12 @@
       }
       state.P = [];
       state.trackingActive = true;
-      let target = SOLVED_FACELETS;
-      for (const tok of state.rawTokens) {
-        target = applyFaceletMove(target, tok);
-      }
-      state.targetFacelets = target;
-      state.prefix = [SOLVED_FACELETS];
-      {
-        let pf = SOLVED_FACELETS;
-        for (let gi = 0; gi < state.S.length; gi++) {
-          state.rawTokens.forEach((tok, i) => { if (state.tokenGroup[i] === gi) pf = applyFaceletMove(pf, tok); });
-          state.prefix.push(pf);
-        }
-      }
+      buildScrambleBaseline(SOLVED_FACELETS);
       scheduleNetRender();
       renderScramble();
+      if (state.conn && !state.P.length) {
+        cubeCmd({ type: "REQUEST_FACELETS" });
+      }
     }
 
     function updateTimerDisplay() {
@@ -1556,6 +1585,7 @@
       cancelAnimationFrame(state.rafId);
       clearDnfTimer();
       state.timerState = 'IDLE';
+      state.solveCompleting = false;
       document.body.classList.remove('solving');
       state.moves = [];
       state.P = [];
@@ -1681,13 +1711,22 @@
               const matched = ev.facelets === state.liveFacelets;
               dbg(matched ? "FACELETS match" : "FACELETS differ");
               const now = performance.now();
+              let adopted = false;
               if (now - state.lastMoveAt >= 150 && !matched) {
                 state.liveFacelets = ev.facelets;
+                adopted = true;
                 scheduleNetRender();
                 dbg("resync adopted");
               }
-              if (state.trackingActive && state.timerState === 'IDLE') afterScrambleProgress();
-              if (state.timerState === 'RUNNING' && state.liveFacelets === SOLVED_FACELETS && state.moves.length >= 3) {
+              if (state.trackingActive && state.timerState === 'IDLE') {
+                if (adopted && !state.P.length) {
+                  buildScrambleBaseline(state.liveFacelets);
+                }
+                afterScrambleProgress();
+              }
+              if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && state.liveFacelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
+                state.solveCompleting = true;
+                state.lastFinishedSeq = state.solveSeq;
                 checkSolvedAndFinish(state.lastMoveAt);
               }
             }
