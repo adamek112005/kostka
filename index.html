@@ -478,10 +478,7 @@
         R: ([x, y, z]) => [x, z, -y],
         L: ([x, y, z]) => [x, -z, y],
         F: ([x, y, z]) => [y, -x, z],
-        B: ([x, y, z]) => [-y, x, z],
-        M: ([x, y, z]) => [x, -z, y],
-        E: ([x, y, z]) => [z, y, -x],
-        S: ([x, y, z]) => [y, -x, z]
+        B: ([x, y, z]) => [-y, x, z]
       };
       const inLayer = {
         U: ([x, y, z]) => y === 1,
@@ -489,14 +486,11 @@
         R: ([x, y, z]) => x === 1,
         L: ([x, y, z]) => x === -1,
         F: ([x, y, z]) => z === 1,
-        B: ([x, y, z]) => z === -1,
-        M: ([x, y, z]) => x === 0,
-        E: ([x, y, z]) => y === 0,
-        S: ([x, y, z]) => z === 0
+        B: ([x, y, z]) => z === -1
       };
 
       const perms = {};
-      for (const f of [...faces, 'M', 'E', 'S']) {
+      for (const f of faces) {
         const q1 = new Array(54);
         for (let i = 0; i < 54; i++) {
           const { p, n } = stickers[i];
@@ -519,7 +513,7 @@
 
     function applyFaceletMove(facelets, moveStr) {
       if (!moveStr || typeof moveStr !== 'string') return facelets;
-      const m = moveStr.trim().match(/^([URFDLBMES])(2|')?$/i);
+      const m = moveStr.trim().match(/^([URFDLB])(2|')?$/i);
       if (!m) return facelets;
       const f = m[1].toUpperCase();
       const q = m[2] === '2' ? 2 : (m[2] === "'" ? 3 : 1);
@@ -793,7 +787,7 @@
 
       function parseMoveSpec(moveStr) {
         if (!moveStr || typeof moveStr !== 'string') return null;
-        const m = moveStr.trim().match(/^([URFDLBMESXYZ])(2|')?$/i);
+        const m = moveStr.trim().match(/^([URFDLBXYZ])(2|')?$/i);
         if (!m) return null;
         const face = m[1].toUpperCase();
         const mod = m[2] || '';
@@ -809,9 +803,6 @@
           case 'L': axis = 'x'; layer = -1; dir = 1; break;
           case 'F': axis = 'z'; layer = 1; dir = -1; break;
           case 'B': axis = 'z'; layer = -1; dir = 1; break;
-          case 'M': axis = 'x'; layer = 0; dir = 1; break;
-          case 'E': axis = 'y'; layer = 0; dir = 1; break;
-          case 'S': axis = 'z'; layer = 0; dir = -1; break;
           case 'X': axis = 'x'; layer = null; dir = -1; break;
           case 'Y': axis = 'y'; layer = null; dir = -1; break;
           case 'Z': axis = 'z'; layer = null; dir = -1; break;
@@ -901,9 +892,9 @@
         for (const item of activeGroup.items) {
           const { axis, targetAngle, pivot, moving } = item;
           pivot.rotation[axis] = targetAngle;
-          pivot.updateMatrixWorld(true);
+          pivot.updateMatrixWorld();
           for (const c of moving) {
-            rootGroup.attach(c);
+            c.applyMatrix4(pivot.matrix);
             c.position.set(
               Math.round(c.position.x / 1.0) * 1.0,
               Math.round(c.position.y / 1.0) * 1.0,
@@ -912,7 +903,8 @@
             const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
             const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
             c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-            c.updateMatrix();
+            pivot.remove(c);
+            rootGroup.add(c);
           }
           rootGroup.remove(pivot);
         }
@@ -1156,7 +1148,7 @@
     })();
 
     function analyzeSteps(solve) {
-      const isFace = m => /^[URFDLBMES]/i.test(m);
+      const isFace = m => /^[URFDLB]/.test(m);
       let f = SOLVED_FACELETS;
       for (const t of (solve.scramble || '').trim().split(/\s+/)) if (isFace(t)) f = applyFaceletMove(f, t);
       const mv = (solve.moves || []).filter(x => isFace(x.m));
@@ -1307,13 +1299,13 @@
       let f = SOLVED_FACELETS;
       const scrTokens = (scrambleStr || '').trim().split(/\s+/);
       for (const tok of scrTokens) {
-        if (/^[URFDLBMES]/i.test(tok)) {
+        if (/^[URFDLB]/i.test(tok)) {
           f = applyFaceletMove(f, tok);
         }
       }
       for (const item of movesList) {
         const m = typeof item === 'string' ? item : item.m;
-        if (m && /^[URFDLBMES]/i.test(m)) {
+        if (m && /^[URFDLB]/i.test(m)) {
           f = applyFaceletMove(f, m);
         }
       }
@@ -1378,9 +1370,9 @@
 
     const AXIS_FACES = [['U', 'D'], ['R', 'L'], ['F', 'B']];
     function axisOfFace(f) {
-      if (f === 'U' || f === 'D' || f === 'E') return 0;
-      if (f === 'R' || f === 'L' || f === 'M') return 1;
-      if (f === 'F' || f === 'B' || f === 'S') return 2;
+      if (f === 'U' || f === 'D') return 0;
+      if (f === 'R' || f === 'L') return 1;
+      if (f === 'F' || f === 'B') return 2;
       return -1;
     }
     function makeGroup(axis) {
@@ -1638,18 +1630,16 @@
 
     function scheduleThreeMove(str, evSerial, now) {
       if (state.simMode !== '3D') return;
-      const parseLayerInfo = (s) => {
-        const m = String(s).trim().match(/^([URFDLBMESXYZ])(2|')?$/i);
+      const spec = (() => {
+        const m = String(str).trim().match(/^([URFDLBXYZ])(2|')?$/i);
         if (!m) return null;
         const face = m[1].toUpperCase();
-        const axis = (face === 'U' || face === 'D' || face === 'E' || face === 'Y') ? 'y'
-          : ((face === 'R' || face === 'L' || face === 'M' || face === 'X') ? 'x' : 'z');
+        const axis = (face === 'U' || face === 'D' || face === 'Y') ? 'y'
+          : ((face === 'R' || face === 'L' || face === 'X') ? 'x' : 'z');
         const layer = (face === 'U' || face === 'R' || face === 'F') ? 1
-          : ((face === 'D' || face === 'L' || face === 'B') ? -1
-          : ((face === 'M' || face === 'E' || face === 'S') ? 0 : null));
+          : ((face === 'D' || face === 'L' || face === 'B') ? -1 : null);
         return { axis, layer };
-      };
-      const spec = parseLayerInfo(str);
+      })();
       if (!spec || spec.layer === null) {
         flushPendingSimulGroup();
         threeCube.addMoveGroup([str]);
@@ -1660,8 +1650,14 @@
         && (now - pendingSimulGroup.at) <= 25
         && (serialNum === null || pendingSimulGroup.serial === null || Math.abs(serialNum - pendingSimulGroup.serial) <= 1)
         && pendingSimulGroup.moves.every(prevStr => {
-          const p = parseLayerInfo(prevStr);
-          return p && p.layer !== null && !(p.axis === spec.axis && p.layer === spec.layer);
+          const pm = String(prevStr).trim().match(/^([URFDLBXYZ])(2|')?$/i);
+          if (!pm) return false;
+          const pf = pm[1].toUpperCase();
+          const pAxis = (pf === 'U' || pf === 'D' || pf === 'Y') ? 'y'
+            : ((pf === 'R' || pf === 'L' || pf === 'X') ? 'x' : 'z');
+          const pLayer = (pf === 'U' || pf === 'R' || pf === 'F') ? 1
+            : ((pf === 'D' || pf === 'L' || pf === 'B') ? -1 : null);
+          return pLayer !== null && !(pAxis === spec.axis && pLayer === spec.layer);
         });
       if (canMerge) {
         pendingSimulGroup.moves.push(str);
