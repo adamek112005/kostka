@@ -478,7 +478,7 @@
         R: ([x, y, z]) => [x, z, -y],
         L: ([x, y, z]) => [x, -z, y],
         F: ([x, y, z]) => [y, -x, z],
-        B: ([x, y, z]) => [-y, x, z]
+        B: ([x, y, z]) => [-y, x, z],
       };
       const inLayer = {
         U: ([x, y, z]) => y === 1,
@@ -486,7 +486,7 @@
         R: ([x, y, z]) => x === 1,
         L: ([x, y, z]) => x === -1,
         F: ([x, y, z]) => z === 1,
-        B: ([x, y, z]) => z === -1
+        B: ([x, y, z]) => z === -1,
       };
 
       const perms = {};
@@ -604,14 +604,15 @@
     }
 
 
-    // --- Independent Three.js 3D Cube Preview ---
+    // --- Independent Three.js 3D Cube Preview (State-Driven) ---
     const threeCube = (() => {
       let scene = null, camera = null, renderer = null, rootGroup = null;
       let cubies = [];
       let animId = null;
       let initialized = false;
-      let activeTurn = null;
-      const queue = [];
+      let lastAppliedFacelets = SOLVED_FACELETS;
+      let transition = null;
+      let queuedState = null;
 
       const COLORS = {
         U: 0xf8fafc,
@@ -655,6 +656,8 @@
         const sticker = new THREE.Mesh(sharedStickerGeo, mat);
         sticker.position.set(pos[0], pos[1], pos[2]);
         sticker.rotation.set(rot[0], rot[1], rot[2]);
+        sticker.userData.dir = pos.map(v => Math.sign(v));
+        sticker.userData.origHex = colorHex;
         parent.add(sticker);
       }
 
@@ -673,6 +676,7 @@
         if (z === -1) addSticker(group, COLORS.B, [0, 0, -offset], [0, Math.PI, 0]);
 
         group.position.set(x * gap, y * gap, z * gap);
+        group.userData.home = [x, y, z];
         return group;
       }
 
@@ -682,8 +686,8 @@
           rootGroup.remove(rootGroup.children[0]);
         }
         cubies = [];
-        activeTurn = null;
-        queue.length = 0;
+        transition = null;
+        queuedState = null;
         for (let x = -1; x <= 1; x++) {
           for (let y = -1; y <= 1; y++) {
             for (let z = -1; z <= 1; z++) {
@@ -768,82 +772,201 @@
         renderer.setSize(w, h);
       }
 
-      function parseMoveSpec(moveStr) {
-        if (!moveStr || typeof moveStr !== 'string') return null;
-        const m = moveStr.trim().match(/^([URFDLBXYZ])(2|')?$/i);
-        if (!m) return null;
-        const face = m[1].toUpperCase();
-        const mod = m[2] || '';
-        let turns = 1;
-        if (mod === '2') turns = 2;
-        else if (mod === "'") turns = -1;
-
-        let axis = 'y', layer = null, dir = 1;
-        switch (face) {
-          case 'U': axis = 'y'; layer = 1; dir = -1; break;
-          case 'D': axis = 'y'; layer = -1; dir = 1; break;
-          case 'R': axis = 'x'; layer = 1; dir = -1; break;
-          case 'L': axis = 'x'; layer = -1; dir = 1; break;
-          case 'F': axis = 'z'; layer = 1; dir = -1; break;
-          case 'B': axis = 'z'; layer = -1; dir = 1; break;
-          case 'X': axis = 'x'; layer = null; dir = -1; break;
-          case 'Y': axis = 'y'; layer = null; dir = -1; break;
-          case 'Z': axis = 'z'; layer = null; dir = -1; break;
-          default: return null;
-        }
-        return { axis, layer, angle: dir * turns * (Math.PI / 2) };
-      }
-
-      function beginNextTurn() {
-        if (activeTurn || queue.length === 0) return;
-        const spec = queue.shift();
-        const pivot = new THREE.Group();
-        pivot.rotation.set(0, 0, 0);
-        rootGroup.add(pivot);
-
-        const moving = [];
-        for (const c of cubies) {
-          if (spec.layer === null) {
-            moving.push(c);
-          } else {
-            const coord = Math.round(c.position[spec.axis] / 1.0);
-            if (coord === spec.layer) moving.push(c);
+      function faceletColorAt(decoded, x, y, z, nx, ny, nz) {
+        for (const s of decoded.stickers) {
+          if (s.p[0] === x && s.p[1] === y && s.p[2] === z &&
+              s.n[0] === nx && s.n[1] === ny && s.n[2] === nz) {
+            return COLORS[s.color] ?? COLORS.core;
           }
         }
-        for (const c of moving) {
-          rootGroup.remove(c);
-          pivot.add(c);
-        }
-        activeTurn = {
-          axis: spec.axis,
-          targetAngle: spec.angle,
-          currentAngle: 0,
-          pivot,
-          moving
-        };
+        return COLORS.core;
       }
 
-      function finishActiveTurn() {
-        if (!activeTurn) return;
-        const { axis, targetAngle, pivot, moving } = activeTurn;
-        pivot.rotation[axis] = targetAngle;
-        pivot.updateMatrixWorld();
-        for (const c of moving) {
-          c.applyMatrix4(pivot.matrix);
-          c.position.set(
-            Math.round(c.position.x / 1.0) * 1.0,
-            Math.round(c.position.y / 1.0) * 1.0,
-            Math.round(c.position.z / 1.0) * 1.0
-          );
-          const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-          const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-          c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-          pivot.remove(c);
-          rootGroup.add(c);
+      function computePieceTransforms(decoded) {
+        const homeCoords = [];
+        for (let x = -1; x <= 1; x++) {
+          for (let y = -1; y <= 1; y++) {
+            for (let z = -1; z <= 1; z++) {
+              if (x !== 0 || y !== 0 || z !== 0) {
+                homeCoords.push([x, y, z]);
+              }
+            }
+          }
         }
-        rootGroup.remove(pivot);
-        activeTurn = null;
-        beginNextTurn();
+        const rotMatrices = [];
+        const axes = [
+          new THREE.Vector3(1, 0, 0),
+          new THREE.Vector3(0, 1, 0),
+          new THREE.Vector3(0, 0, 1)
+        ];
+        const seen = new Set();
+        for (let ix = 0; ix < 4; ix++) {
+          for (let iy = 0; iy < 4; iy++) {
+            for (let iz = 0; iz < 4; iz++) {
+              const q = new THREE.Quaternion()
+                .setFromAxisAngle(axes[0], ix * Math.PI / 2)
+                .premultiply(new THREE.Quaternion().setFromAxisAngle(axes[1], iy * Math.PI / 2))
+                .premultiply(new THREE.Quaternion().setFromAxisAngle(axes[2], iz * Math.PI / 2));
+              const mat = new THREE.Matrix4().makeRotationFromQuaternion(q);
+              const key = mat.elements.map(v => Math.round(v * 100)).join(',');
+              if (!seen.has(key)) {
+                seen.add(key);
+                rotMatrices.push({ mat, quat: q });
+              }
+            }
+          }
+        }
+
+        const targetColorsBySlot = new Map();
+        for (const [hx, hy, hz] of homeCoords) {
+          const dirs = [];
+          if (hx === 1)  dirs.push([1, 0, 0]);
+          if (hx === -1) dirs.push([-1, 0, 0]);
+          if (hy === 1)  dirs.push([0, 1, 0]);
+          if (hy === -1) dirs.push([0, -1, 0]);
+          if (hz === 1)  dirs.push([0, 0, 1]);
+          if (hz === -1) dirs.push([0, 0, -1]);
+          const colors = dirs.map(([dx, dy, dz]) => faceletColorAt(decoded, hx, hy, hz, dx, dy, dz));
+          targetColorsBySlot.set(`${hx},${hy},${hz}`, { dirs, colors });
+        }
+
+        const usedCubies = new Set();
+        const result = cubies.map(() => ({
+          pos: new THREE.Vector3(),
+          quat: new THREE.Quaternion(),
+          colors: []
+        }));
+
+        for (const [tx, ty, tz] of homeCoords) {
+          const slotInfo = targetColorsBySlot.get(`${tx},${ty},${tz}`);
+          let matchedIdx = -1;
+          let matchedQuat = new THREE.Quaternion();
+          let matchedColors = slotInfo.colors;
+
+          for (let ci = 0; ci < cubies.length; ci++) {
+            if (usedCubies.has(ci)) continue;
+            const c = cubies[ci];
+            const [hx, hy, hz] = c.userData.home;
+            const childStickers = c.children.filter(ch => ch.userData && ch.userData.dir);
+            if (childStickers.length !== slotInfo.dirs.length) continue;
+
+            for (const { mat, quat } of rotMatrices) {
+              const pVec = new THREE.Vector3(hx, hy, hz).applyMatrix4(mat);
+              if (Math.round(pVec.x) !== tx || Math.round(pVec.y) !== ty || Math.round(pVec.z) !== tz) continue;
+
+              let allMatch = true;
+              const orderedColors = [];
+              for (const [sdx, sdy, sdz] of slotInfo.dirs) {
+                const wantHex = faceletColorAt(decoded, tx, ty, tz, sdx, sdy, sdz);
+                let foundHex = null;
+                for (const ch of childStickers) {
+                  const wDir = new THREE.Vector3(...ch.userData.dir).applyMatrix4(mat);
+                  if (Math.round(wDir.x) === sdx && Math.round(wDir.y) === sdy && Math.round(wDir.z) === sdz) {
+                    foundHex = ch.userData.origHex;
+                    break;
+                  }
+                }
+                if (foundHex !== wantHex) {
+                  allMatch = false;
+                  break;
+                }
+                orderedColors.push(wantHex);
+              }
+
+              if (allMatch) {
+                matchedIdx = ci;
+                matchedQuat = quat.clone();
+                matchedColors = orderedColors;
+                break;
+              }
+            }
+            if (matchedIdx !== -1) break;
+          }
+
+          if (matchedIdx !== -1) {
+            usedCubies.add(matchedIdx);
+            result[matchedIdx] = {
+              pos: new THREE.Vector3(tx, ty, tz),
+              quat: matchedQuat,
+              colors: matchedColors,
+              slotDirs: slotInfo.dirs
+            };
+          }
+        }
+
+        return result;
+      }
+
+      function applyStateInstant(decoded) {
+        if (!decoded || !cubies.length) return;
+        const transforms = computePieceTransforms(decoded);
+        for (let i = 0; i < cubies.length; i++) {
+          const c = cubies[i];
+          const tr = transforms[i];
+          if (!tr || !tr.slotDirs) continue;
+          c.position.copy(tr.pos);
+          c.quaternion.copy(tr.quat);
+          c.updateMatrix();
+          const childStickers = c.children.filter(ch => ch.userData && ch.userData.dir);
+          for (let s = 0; s < childStickers.length; s++) {
+            const ch = childStickers[s];
+            const [sdx, sdy, sdz] = tr.slotDirs[s];
+            const localDir = new THREE.Vector3(sdx, sdy, sdz).applyQuaternion(tr.quat.clone().invert());
+            const targetChild = childStickers.find(other =>
+              Math.round(other.userData.dir[0]) === Math.round(localDir.x) &&
+              Math.round(other.userData.dir[1]) === Math.round(localDir.y) &&
+              Math.round(other.userData.dir[2]) === Math.round(localDir.z)
+            ) || ch;
+            targetChild.material.color.setHex(tr.colors[s]);
+          }
+        }
+        lastAppliedFacelets = decoded.facelets;
+        transition = null;
+      }
+
+      function beginTransition(decoded) {
+        if (!decoded || !cubies.length) return;
+        if (decoded.facelets === lastAppliedFacelets && !transition) return;
+        if (transition) {
+          dbg('3D anim shortened for newer state');
+          applyStateInstant(transition.target);
+        }
+        const startPos = cubies.map(c => c.position.clone());
+        const startQuat = cubies.map(c => c.quaternion.clone());
+        const transforms = computePieceTransforms(decoded);
+        const targetPos = [];
+        const targetQuat = [];
+        for (let i = 0; i < cubies.length; i++) {
+          const c = cubies[i];
+          const tr = transforms[i];
+          if (!tr || !tr.slotDirs) {
+            targetPos.push(c.position.clone());
+            targetQuat.push(c.quaternion.clone());
+            continue;
+          }
+          targetPos.push(tr.pos);
+          targetQuat.push(tr.quat);
+          const childStickers = c.children.filter(ch => ch.userData && ch.userData.dir);
+          for (let s = 0; s < childStickers.length; s++) {
+            const [sdx, sdy, sdz] = tr.slotDirs[s];
+            const localDir = new THREE.Vector3(sdx, sdy, sdz).applyQuaternion(tr.quat.clone().invert());
+            const targetChild = childStickers.find(other =>
+              Math.round(other.userData.dir[0]) === Math.round(localDir.x) &&
+              Math.round(other.userData.dir[1]) === Math.round(localDir.y) &&
+              Math.round(other.userData.dir[2]) === Math.round(localDir.z)
+            );
+            if (targetChild) targetChild.material.color.setHex(tr.colors[s]);
+          }
+        }
+        transition = {
+          target: decoded,
+          elapsed: 0,
+          duration: 0.085,
+          startPos,
+          startQuat,
+          targetPos,
+          targetQuat
+        };
       }
 
       let lastFrameTime = 0;
@@ -852,25 +975,44 @@
         lastFrameTime = performance.now();
         const tick = (now) => {
           animId = requestAnimationFrame(tick);
-          const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
-          lastFrameTime = now;
+          try {
+            const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
+            lastFrameTime = now;
 
-          if (!activeTurn && queue.length > 0) {
-            beginNextTurn();
-          }
-          if (activeTurn) {
-            const speed = 14 * (1 + queue.length);
-            const step = Math.sign(activeTurn.targetAngle) * speed * dt;
-            const nextAngle = activeTurn.currentAngle + step;
-            if (Math.abs(nextAngle) >= Math.abs(activeTurn.targetAngle)) {
-              finishActiveTurn();
-            } else {
-              activeTurn.currentAngle = nextAngle;
-              activeTurn.pivot.rotation[activeTurn.axis] = nextAngle;
+            if (transition) {
+              transition.elapsed += dt;
+              const t = Math.min(transition.elapsed / transition.duration, 1);
+              const ease = 1 - Math.pow(1 - t, 3);
+              for (let i = 0; i < cubies.length; i++) {
+                cubies[i].position.lerpVectors(transition.startPos[i], transition.targetPos[i], ease);
+                cubies[i].quaternion.slerpQuaternions(transition.startQuat[i], transition.targetQuat[i], ease);
+              }
+              if (t >= 1) {
+                const finishedTarget = transition.target;
+                applyStateInstant(finishedTarget);
+                if (queuedState) {
+                  const next = queuedState;
+                  queuedState = null;
+                  beginTransition(next);
+                }
+              }
+            } else if (queuedState) {
+              const next = queuedState;
+              queuedState = null;
+              beginTransition(next);
             }
-          }
-          if (renderer && scene && camera && state.simMode === '3D') {
-            renderer.render(scene, camera);
+
+            if (renderer && scene && camera && state.simMode === '3D') {
+              renderer.render(scene, camera);
+            }
+          } catch (e) {
+            dbg('3D loop err ' + e);
+            transition = null;
+            queuedState = null;
+            try {
+              const fallback = decodeFaceletsToPieceState(lastAppliedFacelets);
+              if (fallback) applyStateInstant(fallback);
+            } catch {}
           }
         };
         animId = requestAnimationFrame(tick);
@@ -887,41 +1029,27 @@
           const wrap = document.getElementById('three-wrap');
           if (wrap) wrap.style.display = 'none';
         },
-        addMove(moveStr) {
-          const spec = parseMoveSpec(moveStr);
-          if (!spec) return;
+        setTargetState(decoded) {
           if (!initialized) init();
-          queue.push(spec);
-          if (!activeTurn) beginNextTurn();
+          if (!decoded) return;
+          if (transition) {
+            queuedState = decoded;
+            dbg('3D state queued (skipping older)');
+          } else {
+            beginTransition(decoded);
+          }
+        },
+        setStateInstant(decoded) {
+          if (!initialized) init();
+          if (!decoded) return;
+          queuedState = null;
+          applyStateInstant(decoded);
         },
         reset() {
           if (!initialized) return;
           rebuildCubies();
-        },
-        applyMovesInstant(movesList) {
-          if (!initialized) init();
-          rebuildCubies();
-          for (const mv of movesList) {
-            const spec = parseMoveSpec(mv);
-            if (!spec) continue;
-            const pivot = new THREE.Group();
-            pivot.rotation[spec.axis] = spec.angle;
-            pivot.updateMatrix();
-            for (const c of cubies) {
-              const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.0);
-              if (spec.layer === null || coord === spec.layer) {
-                c.applyMatrix4(pivot.matrix);
-                c.position.set(
-                  Math.round(c.position.x / 1.0) * 1.0,
-                  Math.round(c.position.y / 1.0) * 1.0,
-                  Math.round(c.position.z / 1.0) * 1.0
-                );
-                const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-                const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-                c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-              }
-            }
-          }
+          const solved = decodeFaceletsToPieceState(SOLVED_FACELETS);
+          if (solved) applyStateInstant(solved);
         }
       };
     })();
@@ -930,7 +1058,6 @@
       if (mode !== '2D' && mode !== '3D' && mode !== 'Off') {
         mode = '2D';
       }
-      const prevMode = state.simMode;
       state.simMode = mode;
       try {
         localStorage.setItem('gan_sim_mode', mode);
@@ -947,7 +1074,9 @@
       if (mode === '3D') {
         if (net) net.style.display = 'none';
         threeCube.show();
-        threeCube.applyMovesInstant(state.cubeMoves);
+        const decoded = decodeFaceletsToPieceState(state.liveFacelets);
+        if (decoded) threeCube.setStateInstant(decoded);
+        if (state.conn) requestCubeStateSync('mode-3D');
       } else {
         threeCube.hide();
         if (net) net.style.display = 'block';
@@ -1052,7 +1181,7 @@
     })();
 
     function analyzeSteps(solve) {
-      const isFace = m => /^[URFDLB]/.test(m);
+      const isFace = m => /^[URFDLB]/i.test(m);
       let f = SOLVED_FACELETS;
       for (const t of (solve.scramble || '').trim().split(/\s+/)) if (isFace(t)) f = applyFaceletMove(f, t);
       const mv = (solve.moves || []).filter(x => isFace(x.m));
@@ -1503,27 +1632,108 @@
       state.rafId = requestAnimationFrame(updateTimerDisplay);
     }
 
-    function handleMove(move) {
+    function isValidFacelets(f) {
+      if (typeof f !== 'string' || f.length !== 54) return false;
+      const counts = { U: 0, R: 0, F: 0, D: 0, L: 0, B: 0 };
+      for (let i = 0; i < 54; i++) {
+        const ch = f[i];
+        if (!(ch in counts)) return false;
+        counts[ch]++;
+      }
+      return Object.values(counts).every(c => c === 9);
+    }
+
+    function decodeFaceletsToPieceState(facelets) {
+      if (!isValidFacelets(facelets)) return null;
+      const centers = {
+        U: facelets[4],
+        R: facelets[13],
+        F: facelets[22],
+        D: facelets[31],
+        L: facelets[40],
+        B: facelets[49]
+      };
+      const slotFaces = {
+        U: 'U', R: 'R', F: 'F', D: 'D', L: 'L', B: 'B'
+      };
+      const stickers = [];
+      for (let fIdx = 0; fIdx < 6; fIdx++) {
+        const fChar = slotFaces[FACE_L[fIdx]];
+        for (let k = 0; k < 9; k++) {
+          const r = Math.floor(k / 3);
+          const c = k % 3;
+          let p, n;
+          if (fIdx === 0)      { p = [c - 1, 1, r - 1];  n = [0, 1, 0]; }
+          else if (fIdx === 1) { p = [1, 1 - r, 1 - c];  n = [1, 0, 0]; }
+          else if (fIdx === 2) { p = [c - 1, 1 - r, 1];  n = [0, 0, 1]; }
+          else if (fIdx === 3) { p = [c - 1, -1, 1 - r]; n = [0, -1, 0]; }
+          else if (fIdx === 4) { p = [-1, 1 - r, c - 1]; n = [-1, 0, 0]; }
+          else                 { p = [1 - c, 1 - r, -1]; n = [0, 0, -1]; }
+          stickers.push({ p, n, color: facelets[fIdx * 9 + k] });
+        }
+      }
+      return { facelets, centers, stickers };
+    }
+
+    function requestCubeStateSync(reason) {
+      if (!state.conn || state.faceletsPending) return;
+      state.faceletsPending = true;
+      dbg('3D req state (' + (reason || 'sync') + ')');
+      clearTimeout(state.faceletsPendingTimer);
+      state.faceletsPendingTimer = setTimeout(() => {
+        state.faceletsPending = false;
+      }, 1500);
+      cubeCmd({ type: "REQUEST_FACELETS" });
+    }
+
+    function syncCubeState(facelets, opts = {}) {
+      if (!isValidFacelets(facelets)) {
+        dbg('3D state invalid');
+        return false;
+      }
+      dbg('3D state valid');
+      const decoded = decodeFaceletsToPieceState(facelets);
+      if (!decoded) {
+        dbg('3D decode err');
+        return false;
+      }
+      state.liveFacelets = facelets;
+      dbg('3D internal state updated');
+      scheduleNetRender();
+      if (state.simMode === '3D') {
+        try {
+          if (opts.instant) {
+            threeCube.setStateInstant(decoded);
+          } else {
+            threeCube.setTargetState(decoded);
+          }
+          dbg('3D model synced');
+        } catch (e) {
+          dbg('3D sync err ' + e);
+        }
+      }
+      return true;
+    }
+
+    function handleMove(move, evMeta) {
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
       state.cubeMoves.push(str);
 
-      const now = performance.now();
+      const rawTs = typeof evMeta?.timestamp === 'number' && Number.isFinite(evMeta.timestamp) ? evMeta.timestamp : null;
+      const now = rawTs !== null ? rawTs : performance.now();
       state.lastMoveAt = now;
 
       let isSolved = false;
       if (!/^[xyz]/i.test(str)) {
-        state.liveFacelets = applyFaceletMove(state.liveFacelets, str);
-        isSolved = state.liveFacelets === SOLVED_FACELETS;
-        scheduleNetRender();
-      }
-
-      try {
-        if (state.simMode === '3D') {
-          threeCube.addMove(str);
+        const nextFacelets = applyFaceletMove(state.liveFacelets, str);
+        isSolved = nextFacelets === SOLVED_FACELETS;
+        if (!state.conn) {
+          syncCubeState(nextFacelets, { instant: false });
+        } else {
+          state.liveFacelets = nextFacelets;
+          scheduleNetRender();
         }
-      } catch (e) {
-        console.error(e);
       }
 
       try {
@@ -1538,6 +1748,7 @@
           state.timerState = 'RUNNING';
           state.startTime = now;
           state.moves = [{ m: str, t: 0 }];
+          dbg('TIMER start ' + str + ' seq=' + state.solveSeq);
           const val = document.getElementById('timer-val');
           if (val) {
             val.className = 'timer running';
@@ -1714,8 +1925,9 @@
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
-            dbg("MOVE " + ev.move + " serial " + ev.serial);
-            handleMove(ev.move);
+            const mvStr = typeof ev.move === 'string' ? ev.move : (ev.move?.move || ev.move?.latestAlgLeaf?.toString() || '');
+            dbg("MOVE " + mvStr + " serial " + ev.serial);
+            handleMove(ev.move, ev);
             clearTimeout(state.faceletsDebounce);
             state.faceletsDebounce = setTimeout(() => {
               if (state.conn && !state.faceletsPending) {
@@ -1730,16 +1942,17 @@
           } else if (ev.type === "FACELETS") {
             state.faceletsPending = false;
             clearTimeout(state.faceletsPendingTimer);
-            if (typeof ev.facelets === 'string' && ev.facelets.length === 54) {
+            dbg("FACELETS recv");
+            if (isValidFacelets(ev.facelets)) {
               const matched = ev.facelets === state.liveFacelets;
               dbg(matched ? "FACELETS match" : "FACELETS differ");
               const now = performance.now();
               let adopted = false;
-              if (now - state.lastMoveAt >= 150 && !matched) {
-                state.liveFacelets = ev.facelets;
-                adopted = true;
-                scheduleNetRender();
-                dbg("resync adopted");
+              if (!matched && (now - state.lastMoveAt >= 150 || state.simMode === '3D')) {
+                adopted = syncCubeState(ev.facelets, { instant: false });
+                if (adopted) dbg("resync adopted");
+              } else if (state.simMode === '3D') {
+                syncCubeState(ev.facelets, { instant: false });
               }
               if (state.trackingActive && state.timerState === 'IDLE') {
                 if (adopted && !state.P.length) {
@@ -1748,10 +1961,11 @@
                 afterScrambleProgress();
               }
               if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
-                state.liveFacelets = SOLVED_FACELETS;
-                scheduleNetRender();
+                syncCubeState(SOLVED_FACELETS, { instant: false });
                 checkSolvedAndFinish(state.lastMoveAt || now);
               }
+            } else {
+              dbg("FACELETS invalid");
             }
           } else if (ev.type === "BATTERY") {
             const bat = document.getElementById('battery-pill');
@@ -1771,7 +1985,8 @@
           }
         });
 
-        await cubeCmd({ type: "REQUEST_FACELETS" });
+        dbg("BT connected");
+        requestCubeStateSync("connect");
         await cubeCmd({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
