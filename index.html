@@ -255,6 +255,23 @@
       padding: 8px 0;
       z-index: 2;
     }
+    .steps-bar{display:flex;height:8px;border-radius:99px;overflow:hidden;margin:2px 0 10px;background:var(--border)}
+    .steps-bar span{display:block;height:100%}
+    .steps-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+    .steps-table{border-collapse:separate;border-spacing:0;font-family:ui-monospace,monospace;font-size:.78rem;min-width:100%;white-space:nowrap}
+    .steps-table th,.steps-table td{padding:6px 10px;text-align:center}
+    .steps-table tbody th,.steps-table thead th:first-child{position:sticky;left:0;background:var(--card);z-index:1}
+    .steps-table tbody th{text-align:left;font-family:system-ui,sans-serif;font-size:.68rem;letter-spacing:.04em;text-transform:uppercase;color:var(--sub);font-weight:600}
+    .steps-table thead th{border-top:3px solid;font-family:system-ui,sans-serif;font-size:.72rem;font-weight:700;vertical-align:top}
+    .steps-table .h1{display:flex;align-items:center;justify-content:center;gap:5px}
+    .steps-table .sw{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--border)}
+    .steps-table .chip{margin:4px auto 0;display:inline-block;padding:1px 7px;border-radius:99px;background:var(--bg);color:var(--sub);font-size:.64rem;font-weight:600}
+    .steps-table tr.strong td{font-weight:700}
+    .steps-table tbody tr+tr td,.steps-table tbody tr+tr th{border-top:1px solid var(--border)}
+    .steps-table .hot{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+    .steps-table .tot{border-left:1px solid var(--border)}
+    .steps-table td small{color:var(--sub);font-size:.68rem}
+    .steps-empty{font-size:.78rem;color:var(--sub)}
   </style>
 </head>
 <body>
@@ -326,7 +343,7 @@
     </div>
   </dialog>
 
-  <dialog id="solve-dialog" style="border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:20px;max-width:340px;margin:auto;">
+  <dialog id="solve-dialog" style="border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);padding:20px;width:min(96vw,560px);max-width:none;max-height:90vh;overflow-y:auto;margin:auto;">
     <div id="solve-dialog-info" style="font-weight:600;font-size:1rem;margin-bottom:10px;text-align:center;">Solve</div>
     <div style="margin-bottom:10px;background:var(--bg);border-radius:8px;padding:8px 10px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
@@ -513,8 +530,6 @@
       sub: null,
       connecting: false,
       batteryTimer: null,
-      batteryPending: false,
-      batteryPendingTimer: null,
       dnfTimer: null,
       faceletsDebounce: null,
       faceletsPending: false,
@@ -529,9 +544,6 @@
       targetFacelets: SOLVED_FACELETS,
       cubeMoves: [],
       timerState: 'IDLE',
-      solveCompleting: false,
-      solveSeq: 0,
-      lastFinishedSeq: -1,
       startTime: 0,
       rafId: null,
       scrambles: [],
@@ -555,9 +567,11 @@
     }
 
     function cubeCmd(cmd) {
-      state.cmdChain = state.cmdChain
-        .then(() => (state.conn ? state.conn.sendCubeCommand(cmd) : null))
-        .catch(e => dbg('cmd error ' + e));
+      const run = () => (state.conn ? Promise.race([
+        state.conn.sendCubeCommand(cmd),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
+      ]) : null);
+      state.cmdChain = state.cmdChain.then(run).catch(e => dbg('cmd error ' + e));
       return state.cmdChain;
     }
 
@@ -1021,10 +1035,7 @@
           const edge = edges.find(e => e.map(faceOf).sort().join('') === adjFaces);
           if (!edge) continue;
           const stickers = [...corner, ...edge];
-          const f0 = faceOf(edge[0]);
-          const f1 = faceOf(edge[1]);
           slots.push({
-            id: f0 + f1,
             stickers,
             check: f => stickers.every(i => f[i] === faceOf(i))
           });
@@ -1034,75 +1045,7 @@
       return map;
     })();
 
-    function analyzeF2lPairs(st, mv, C, crossEnd, f2lEnd) {
-      const slots = F2L_SLOTS_BY_CROSS[C];
-      if (!slots || slots.length !== 4 || crossEnd < 0 || f2lEnd < crossEnd) {
-        return [null, null, null, null];
-      }
-
-      // Compute final stable completion move index for each of the 4 slots within [crossEnd, f2lEnd]
-      const slotInfo = slots.map((slot, sIdx) => {
-        const preSolved = slot.check(st[crossEnd]);
-        let completedAt = -1;
-        if (slot.check(st[f2lEnd])) {
-          let k = f2lEnd;
-          while (k > crossEnd && slot.check(st[k - 1])) {
-            k--;
-          }
-          completedAt = k;
-        }
-        return {
-          sIdx,
-          slot,
-          preSolved,
-          completedAt
-        };
-      });
-
-      // Verify all 4 slots are solved at f2lEnd
-      if (slotInfo.some(info => info.completedAt < 0)) {
-        return [null, null, null, null];
-      }
-
-      // Sort slots into actual chronological completion order
-      // Pre-solved slots (completedAt === crossEnd) come first, then ascending completedAt
-      const ordered = slotInfo.slice().sort((a, b) => {
-        if (a.completedAt !== b.completedAt) return a.completedAt - b.completedAt;
-        return a.sIdx - b.sIdx;
-      });
-
-      let prevEnd = crossEnd;
-      return ordered.map((info) => {
-        const end = info.completedAt;
-        if (end <= prevEnd) {
-          return {
-            slot: info.slot.id,
-            done: true,
-            skipped: true,
-            moves: 0,
-            ms: 0,
-            tps: 0
-          };
-        }
-        const segMoves = mv.slice(prevEnd, end);
-        const moves = computeMoveCount(segMoves);
-        const startTs = prevEnd > 0 ? mv[prevEnd - 1].t : 0;
-        const endTs = mv[end - 1].t;
-        const ms = Math.max(0, endTs - startTs);
-        const tps = ms > 0 ? parseFloat((moves / (ms / 1000)).toFixed(2)) : 0;
-        prevEnd = end;
-        return {
-          slot: info.slot.id,
-          done: true,
-          skipped: false,
-          moves,
-          ms,
-          tps
-        };
-      });
-    }
-
-    function analyzeCfop(solve) {
+    function analyzeSteps(solve) {
       const isFace = m => /^[URFDLB]/.test(m);
       let f = SOLVED_FACELETS;
       for (const t of (solve.scramble || '').trim().split(/\s+/)) if (isFace(t)) f = applyFaceletMove(f, t);
@@ -1116,32 +1059,79 @@
         const i = first(s => f2lDone(s, c));
         if (i >= 0 && (f2l < 0 || i < f2l)) { f2l = i; C = c; }
       }
-      if (C === null) return null;
+      let cross = -1;
+      if (C === null) {
+        for (const c of FACE_L) {
+          const i = first(s => crossDone(s, c));
+          if (i >= 0 && (cross < 0 || i < cross)) { cross = i; C = c; }
+        }
+        if (C === null) return null;
+      } else {
+        cross = first(s => crossDone(s, C));
+      }
       const T = OPP[C];
-      const cross = first(s => crossDone(s, C));
-      const oll = first(s => f2lDone(s, C) && ollDone(s, C), f2l);
+      const oll = f2l >= 0 ? first(s => f2lDone(s, C) && ollDone(s, C), f2l) : -1;
       const pll = oll >= 0 ? first(s => s === SOLVED_FACELETS, oll) : -1;
-      const ollSig = canonOll(ollDigits(st[f2l], T));
+
+      const slots = F2L_SLOTS_BY_CROSS[C];
+      const solvedSet = i => (crossDone(st[i], C) ? slots.map((s, k) => (s.check(st[i]) ? k : -1)).filter(k => k >= 0) : null);
+      const doneAt = new Map();
+      let best = 0;
+      for (let i = cross; i <= (f2l >= 0 ? f2l : n); i++) {
+        const s = solvedSet(i);
+        if (s && s.length > best) {
+          s.forEach(k => { if (!doneAt.has(k)) doneAt.set(k, i); });
+          best = s.length;
+        }
+      }
+      const slotOrder = slots.map((_, k) => k).filter(k => doneAt.has(k)).sort((a, b) => doneAt.get(a) - doneAt.get(b) || a - b);
+
+      const ends = [cross, ...[0, 1, 2, 3].map(k => (k < slotOrder.length ? doneAt.get(slotOrder[k]) : -1)), oll, pll];
+      const ollSig = f2l >= 0 ? canonOll(ollDigits(st[f2l], T)) : null;
       const pllSig = oll >= 0 ? canonPll(pllPerm(st[oll], T)) : null;
-      const ollNum = OLL_SIG[ollSig];
-      const info = [
-        {},
-        {},
-        { skipped: ollSig === '00000000', name: ollNum ? 'OLL ' + ollNum + (OLL_NICK[ollNum] ? ' (' + OLL_NICK[ollNum] + ')' : '') : 'OLL ?' },
-        { skipped: pllSig === '01234567', name: pllSig ? (PLL_SIG[pllSig] ? PLL_SIG[pllSig] + ' perm' : 'PLL ?') : '' }
-      ];
-      const phases = [];
-      let prev = 0;
-      ['Cross', 'F2L', 'OLL', 'PLL'].forEach((name, k) => {
-        const end = [cross, f2l, oll, pll][k];
-        if (end < 0) { phases.push({ name, done: false }); return; }
-        const moves = computeMoveCount(mv.slice(prev, end));
-        const ms = end > prev ? mv[end - 1].t - (prev > 0 ? mv[prev - 1].t : 0) : 0;
-        phases.push({ name, done: true, moves, ms, skipped: info[k].skipped ?? moves === 0, label: info[k].name || '' });
+      const ollNum = ollSig ? OLL_SIG[ollSig] : null;
+      const steps = [];
+      let prev = 0, prevT = 0, sumRec = 0, sumExe = 0, sumTurns = 0;
+      ends.forEach((end, k) => {
+        const kind = k === 0 ? 'cross' : k <= 4 ? 'slot' : k === 5 ? 'oll' : 'pll';
+        const step = { kind, done: end >= 0 };
+        if (kind === 'slot') {
+          const s = k <= slotOrder.length ? slots[slotOrder[k - 1]] : null;
+          if (s) step.colors = [faceOf(s.stickers[1]), faceOf(s.stickers[2])];
+          step.label = 'Slot ' + k;
+        } else if (kind === 'cross') {
+          step.label = 'Cross';
+          step.colors = [C, C];
+          step.chip = CROSS_COLOR[C];
+        } else if (kind === 'oll') {
+          step.label = 'OLL';
+          step.chip = ollNum ? 'OLL ' + ollNum : 'OLL ?';
+          step.skipped = end >= 0 && ollSig === '00000000';
+        } else {
+          step.label = 'PLL';
+          step.chip = pllSig ? (PLL_SIG[pllSig] ? 'PLL ' + PLL_SIG[pllSig] : 'PLL ?') : '';
+          step.skipped = end >= 0 && pllSig === '01234567';
+        }
+        if (!step.done) { steps.push(step); return; }
+        const seg = mv.slice(prev, end);
+        if (!seg.length) {
+          step.skipped = true;
+          step.cum = prevT;
+        } else {
+          const firstT = seg[0].t, lastT = seg[seg.length - 1].t;
+          step.turns = computeMoveCount(seg);
+          step.rec = kind === 'cross' ? 0 : firstT - prevT;
+          step.exe = lastT - firstT;
+          step.time = step.rec + step.exe;
+          step.cum = lastT;
+          step.tps = step.time > 0 ? step.turns / (step.time / 1000) : 0;
+          sumRec += step.rec; sumExe += step.exe; sumTurns += step.turns;
+          prevT = lastT;
+        }
         prev = end;
+        steps.push(step);
       });
-      const f2lPairs = analyzeF2lPairs(st, mv, C, cross, f2l);
-      return { crossColor: CROSS_COLOR[C], phases, f2lPairs };
+      return { crossColor: CROSS_COLOR[C], steps, total: { rec: sumRec, exe: sumExe, time: prevT, turns: sumTurns, tps: prevT > 0 ? sumTurns / (prevT / 1000) : 0 } };
     }
 
     function clearDnfTimer() {
@@ -1164,13 +1154,9 @@
     }
 
     window.markDnf = () => {
-      if (state.timerState !== 'RUNNING' || state.solveCompleting) return;
-      if (state.lastFinishedSeq === state.solveSeq) return;
-      state.solveCompleting = true;
-      state.lastFinishedSeq = state.solveSeq;
+      if (state.timerState !== 'RUNNING') return;
       cancelAnimationFrame(state.rafId);
       clearDnfTimer();
-      clearTimeout(state.faceletsDebounce);
       state.timerState = 'IDLE';
       document.body.classList.remove('solving');
 
@@ -1190,7 +1176,7 @@
         sub.textContent = 'DNF';
       }
 
-      const solveRecord = {
+      state.solves.unshift({
         id: Date.now(),
         time: parseFloat(sec),
         ms: totalMs,
@@ -1199,13 +1185,7 @@
         scramble: state.scramble,
         moves: state.moves,
         dnf: true
-      };
-      try {
-        const cfop = analyzeCfop(solveRecord);
-        if (cfop && cfop.f2lPairs) solveRecord.f2lPairs = cfop.f2lPairs;
-      } catch {}
-
-      state.solves.unshift(solveRecord);
+      });
       saveSolves();
       renderMainStats();
       renderSolvesList();
@@ -1213,34 +1193,11 @@
       nextScramble();
     };
 
-    function isFaceletSequenceSolved(scrambleStr, movesList) {
-      let f = SOLVED_FACELETS;
-      const scrTokens = (scrambleStr || '').trim().split(/\s+/);
-      for (const tok of scrTokens) {
-        if (/^[URFDLB]/i.test(tok)) {
-          f = applyFaceletMove(f, tok);
-        }
-      }
-      for (const item of movesList) {
-        const m = typeof item === 'string' ? item : item.m;
-        if (m && /^[URFDLB]/i.test(m)) {
-          f = applyFaceletMove(f, m);
-        }
-      }
-      return f === SOLVED_FACELETS;
-    }
-
     function checkSolvedAndFinish(now) {
-      if (state.timerState !== 'RUNNING' || state.solveCompleting) return false;
-      if (state.lastFinishedSeq === state.solveSeq) return false;
-      const moveCount = computeMoveCount(state.moves);
-      if (moveCount < 3) return false;
-      const liveSolved = state.liveFacelets === SOLVED_FACELETS;
-      const seqSolved = isFaceletSequenceSolved(state.scramble, state.moves);
-      if (!liveSolved && !seqSolved) return false;
-      finishSolve(now);
-      resetCube2D();
-      return true;
+      if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
+        finishSolve(now);
+        resetCube2D();
+      }
     }
 
     function loadSolves() {
@@ -1266,11 +1223,11 @@
 
     async function generateScrambleString() {
       try {
-        return (await randomScrambleForEvent("333")).toString();
-      } catch (e) {
-        console.error(e);
-        return genScramble(20);
-      }
+        return await Promise.race([
+          randomScrambleForEvent("333").then(s => s.toString()),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('scramble timeout')), 4000))
+        ]);
+      } catch (e) { console.error(e); return genScramble(20); }
     }
 
     function parseMove(str) {
@@ -1391,8 +1348,6 @@
     }
 
     function armTimer() {
-      state.solveCompleting = false;
-      state.solveSeq++;
       state.timerState = 'ARMED';
       state.moves = [];
       const val = document.getElementById('timer-val');
@@ -1423,13 +1378,21 @@
       }
     }
 
-    function onScrambleMove(m) {
-      applyMoveToP(m);
-      const { k, rest } = evalScrambleMatch();
+    function syncScrambleToFacelets() {
+      if (!state.trackingActive || state.timerState !== 'IDLE') return false;
+      for (let j = state.S.length; j >= 0; j--) {
+        if (state.liveFacelets === state.prefix[j]) {
+          state.P = state.S.slice(0, j).map(g => ({ axis: g.axis, q: { ...g.q } }));
+          return true;
+        }
+      }
+      return false;
+    }
 
-      if (k === state.S.length && rest.length === 0) {
+    function afterScrambleProgress() {
+      syncScrambleToFacelets();
+      if (state.liveFacelets === state.targetFacelets) {
         state.trackingActive = false;
-        state.liveFacelets = state.targetFacelets;
         scheduleNetRender();
         renderScramble();
         armTimer();
@@ -1438,6 +1401,11 @@
       } else {
         renderScramble();
       }
+    }
+
+    function onScrambleMove(m) {
+      applyMoveToP(m);
+      afterScrambleProgress();
     }
 
     function setScramble(str) {
@@ -1466,6 +1434,14 @@
         target = applyFaceletMove(target, tok);
       }
       state.targetFacelets = target;
+      state.prefix = [SOLVED_FACELETS];
+      {
+        let pf = SOLVED_FACELETS;
+        for (let gi = 0; gi < state.S.length; gi++) {
+          state.rawTokens.forEach((tok, i) => { if (state.tokenGroup[i] === gi) pf = applyFaceletMove(pf, tok); });
+          state.prefix.push(pf);
+        }
+      }
       scheduleNetRender();
       renderScramble();
     }
@@ -1502,7 +1478,6 @@
 
       try {
         if (/^[xyz]/i.test(str)) return;
-        if (state.solveCompleting) return;
 
         if (state.trackingActive && state.timerState === 'IDLE') {
           onScrambleMove(parseMove(str));
@@ -1529,7 +1504,7 @@
           const sub = document.getElementById('timer-sub');
           if (sub) sub.textContent = `${count} moves | ${curTps} TPS`;
 
-          if (count >= 3 && (isSolved || isFaceletSequenceSolved(state.scramble, state.moves))) {
+          if (isSolved && count >= 3) {
             checkSolvedAndFinish(now);
             return;
           }
@@ -1540,13 +1515,8 @@
     }
 
     function finishSolve(endTime) {
-      if (state.solveCompleting) return;
-      if (state.lastFinishedSeq === state.solveSeq) return;
-      state.solveCompleting = true;
-      state.lastFinishedSeq = state.solveSeq;
       cancelAnimationFrame(state.rafId);
       clearDnfTimer();
-      clearTimeout(state.faceletsDebounce);
       state.timerState = 'IDLE';
       document.body.classList.remove('solving');
 
@@ -1565,7 +1535,7 @@
         sub.textContent = `Completed! ${moveCount} moves | ${tps} TPS`;
       }
 
-      const solveRecord = {
+      state.solves.unshift({
         id: Date.now(),
         time: parseFloat(sec),
         ms: totalMs,
@@ -1574,13 +1544,7 @@
         scramble: state.scramble,
         moves: state.moves,
         dnf: false
-      };
-      try {
-        const cfop = analyzeCfop(solveRecord);
-        if (cfop && cfop.f2lPairs) solveRecord.f2lPairs = cfop.f2lPairs;
-      } catch {}
-
-      state.solves.unshift(solveRecord);
+      });
       saveSolves();
       renderMainStats();
       renderSolvesList();
@@ -1592,7 +1556,6 @@
       cancelAnimationFrame(state.rafId);
       clearDnfTimer();
       state.timerState = 'IDLE';
-      state.solveCompleting = false;
       document.body.classList.remove('solving');
       state.moves = [];
       state.P = [];
@@ -1656,35 +1619,8 @@
         clearInterval(state.batteryTimer);
         state.batteryTimer = null;
       }
-      if (state.batteryPendingTimer) {
-        clearTimeout(state.batteryPendingTimer);
-        state.batteryPendingTimer = null;
-      }
-      state.batteryPending = false;
       const bat = document.getElementById('battery-pill');
       if (bat) bat.textContent = 'Battery: —';
-    }
-
-    function requestBatteryOnce() {
-      if (!state.conn || state.batteryPending) return Promise.resolve();
-      state.batteryPending = true;
-      clearTimeout(state.batteryPendingTimer);
-      state.batteryPendingTimer = setTimeout(() => {
-        state.batteryPending = false;
-        state.batteryPendingTimer = null;
-      }, 10000);
-      return cubeCmd({ type: "REQUEST_BATTERY" });
-    }
-
-    function startBatteryPolling() {
-      if (state.batteryTimer) {
-        clearInterval(state.batteryTimer);
-        state.batteryTimer = null;
-      }
-      state.batteryTimer = setInterval(() => {
-        if (!state.conn) return;
-        requestBatteryOnce();
-      }, 30000);
     }
 
     window.handleStatusClick = () => {
@@ -1750,22 +1686,14 @@
                 scheduleNetRender();
                 dbg("resync adopted");
               }
-              if (state.timerState === 'RUNNING' && !state.solveCompleting && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
-                if (now - state.lastMoveAt >= 150 || state.liveFacelets === SOLVED_FACELETS) {
-                  state.liveFacelets = SOLVED_FACELETS;
-                  scheduleNetRender();
-                  checkSolvedAndFinish(now);
-                }
+              if (state.trackingActive && state.timerState === 'IDLE') afterScrambleProgress();
+              if (state.timerState === 'RUNNING' && state.liveFacelets === SOLVED_FACELETS && state.moves.length >= 3) {
+                checkSolvedAndFinish(state.lastMoveAt);
               }
             }
           } else if (ev.type === "BATTERY") {
-            state.batteryPending = false;
-            clearTimeout(state.batteryPendingTimer);
-            state.batteryPendingTimer = null;
             const bat = document.getElementById('battery-pill');
-            if (bat && typeof ev.batteryLevel === 'number' && !Number.isNaN(ev.batteryLevel)) {
-              bat.textContent = `Battery: ${ev.batteryLevel}%`;
-            }
+            if (bat) bat.textContent = `Battery: ${ev.batteryLevel}%`;
           } else if (ev.type === "DISCONNECT") {
             dbg("DISCONNECT");
             clearTimeout(state.faceletsDebounce);
@@ -1782,8 +1710,14 @@
         });
 
         await cubeCmd({ type: "REQUEST_FACELETS" });
-        await requestBatteryOnce();
-        startBatteryPolling();
+        await cubeCmd({ type: "REQUEST_BATTERY" });
+        state.batteryTimer = setInterval(async () => {
+          try {
+            if (state.conn) await cubeCmd({ type: "REQUEST_BATTERY" });
+          } catch (err) {
+            console.error(err);
+          }
+        }, 60000);
       } catch (err) {
         console.error(err);
         state.connecting = false;
@@ -1949,52 +1883,41 @@
       }
     });
 
-    function renderF2lPairsHtml(pairs) {
-      const list = Array.isArray(pairs) && pairs.length === 4 ? pairs : [null, null, null, null];
-      const rows = list.map((p, idx) => {
-        const label = `F2L ${idx + 1}`;
-        if (!p || !p.done) {
-          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;color:var(--sub);"><span>${label}</span><span>N/A</span><span>N/A</span><span>N/A</span></div>`;
-        }
-        if (p.skipped) {
-          const tStr = '0.00 s';
-          const tpsStr = '0.00 TPS';
-          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;font-family:ui-monospace,monospace;color:var(--sub);"><span>${label}</span><span>${tStr}</span><span>0 moves</span><span>${tpsStr}</span></div>`;
-        }
-        const tStr = `${(p.ms / 1000).toFixed(2)} s`;
-        const tpsVal = p.ms > 0 ? (p.moves / (p.ms / 1000)).toFixed(2) : '0.00';
-        return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;font-family:ui-monospace,monospace;"><span>${label}</span><span>${tStr}</span><span>${p.moves} moves</span><span>${tpsVal} TPS</span></div>`;
-      }).join('');
-      return `<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;"><div style="font-size:0.75rem;color:var(--sub);margin-bottom:6px;">F2L Pairs</div><div style="display:flex;flex-direction:column;gap:4px;">${rows}</div></div>`;
-    }
-
-    function renderCfopHtml(s) {
+    const STEP_COLORS = { cross: '#38bdf8', slot: ['#a78bfa', '#8b5cf6', '#7c3aed', '#6d28d9'], oll: '#fbbf24', pll: '#34d399' };
+    function renderStepsHtml(s) {
       let res = null;
-      try {
-        res = analyzeCfop(s);
-      } catch {
-        return '<div style="font-size:0.78rem;color:var(--sub);">CFOP split unavailable</div>';
-      }
-      if (!res || !res.phases) {
-        return '<div style="font-size:0.78rem;color:var(--sub);">CFOP split unavailable</div>';
-      }
-      if (res.f2lPairs && !Array.isArray(s.f2lPairs)) {
-        s.f2lPairs = res.f2lPairs;
-        saveSolves();
-      }
-      const pairsData = Array.isArray(s.f2lPairs) ? s.f2lPairs : res.f2lPairs;
-      const rows = res.phases.map((p, i) => {
-        const phaseTitle = i === 0 && p.done && !p.skipped ? `${p.name} (${res.crossColor})` : p.name;
-        if (!p.done) {
-          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;color:var(--sub);"><span>${phaseTitle}</span><span>—</span><span>—</span><span></span></div>`;
-        }
-        if (p.skipped) {
-          return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;"><span style="color:var(--sub);">${phaseTitle}</span><span style="color:var(--sub);">skipped</span><span></span><span></span></div>`;
-        }
-        const tStr = `${(p.ms / 1000).toFixed(2)} s`;
-        return `<div style="display:grid;grid-template-columns:1.2fr 0.9fr 0.8fr 1.1fr;gap:4px;font-size:0.78rem;font-family:ui-monospace,monospace;"><span>${phaseTitle}</span><span>${p.moves} moves</span><span>${tStr}</span><span>${p.label}</span></div>`;
+      try { res = analyzeSteps(s); } catch (e) { console.error(e); }
+      if (!res) return '<div class="steps-empty">Step analysis unavailable</div>';
+      const sec = ms => (ms / 1000).toFixed(2);
+      const steps = res.steps;
+      const colorOf = (st, i) => (st.kind === 'slot' ? STEP_COLORS.slot[(i - 1) % 4] : STEP_COLORS[st.kind]);
+      const slowest = steps.reduce((b, st, i) => (st.time > (steps[b]?.time || 0) ? i : b), -1);
+      const total = Math.max(res.total.time, 1);
+      const bar = steps.filter(st => st.time > 0).map(st => {
+        const i = steps.indexOf(st);
+        return `<span title="${st.label} ${sec(st.time)} s" style="width:${(st.time / total * 100).toFixed(2)}%;background:${colorOf(st, i)}"></span>`;
       }).join('');
-      return `<div style="background:var(--bg);border-radius:8px;padding:8px 10px;"><div style="font-size:0.75rem;color:var(--sub);margin-bottom:6px;">CFOP</div><div style="display:flex;flex-direction:column;gap:4px;">${rows}</div>${renderF2lPairsHtml(pairsData)}</div>`;
+      const swatch = st => st.colors
+        ? `<i class="sw" style="background:linear-gradient(135deg,${NET_COLORS[st.colors[0]]} 50%,${NET_COLORS[st.colors[1]]} 50%)"></i>`
+        : '';
+      const head = steps.map((st, i) => {
+        const chip = st.skipped ? 'skipped' : (st.chip || (st.kind === 'slot' && st.colors ? st.colors.join('') : ''));
+        return `<th class="${i === slowest ? 'hot' : ''}" style="border-top-color:${colorOf(st, i)}"><div class="h1">${swatch(st)}${st.label}</div>${chip ? `<div class="chip">${chip}</div>` : ''}</th>`;
+      }).join('') + '<th class="tot" style="border-top-color:var(--sub)"><div class="h1">Total</div></th>';
+      const cell = (st, i, v) => `<td class="${i === slowest ? 'hot' : ''}">${v}</td>`;
+      const dash = '–';
+      const row = (name, fn, totalCell, strong) => `<tr class="${strong ? 'strong' : ''}"><th>${name}</th>${steps.map((st, i) => cell(st, i, !st.done || st.skipped ? dash : fn(st))).join('')}<td class="tot">${totalCell}</td></tr>`;
+      const t = res.total;
+      const pct = v => (t.time > 0 ? Math.round(v / t.time * 100) : 0);
+      const body = [
+        row('Recognition', st => (st.kind === 'cross' ? dash : sec(st.rec)), `${sec(t.rec)} <small>${pct(t.rec)}%</small>`),
+        row('Execution', st => sec(st.exe), `${sec(t.exe)} <small>${pct(t.exe)}%</small>`),
+        row('Step time', st => sec(st.time), sec(t.time), true),
+        row('At', st => sec(st.cum), sec(t.time)),
+        row('Turns', st => st.turns, t.turns),
+        row('TPS', st => st.tps.toFixed(2), t.tps.toFixed(2))
+      ].join('');
+      return `<div class="steps-bar">${bar}</div><div class="steps-scroll"><table class="steps-table"><thead><tr><th></th>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     }
 
     function refreshSolveDialog() {
@@ -2011,7 +1934,7 @@
       const reuseBtn = document.getElementById('btn-reuse-scramble');
       if (reuseBtn) reuseBtn.style.display = s.scramble ? 'inline-block' : 'none';
       const cfopEl = document.getElementById('solve-dialog-cfop');
-      if (cfopEl) cfopEl.innerHTML = renderCfopHtml(s);
+      if (cfopEl) cfopEl.innerHTML = renderStepsHtml(s);
       const p2Btn = document.getElementById('btn-toggle-plus2');
       if (p2Btn) p2Btn.classList.toggle('primary', Boolean(s.plus2));
       const dnfBtn = document.getElementById('btn-toggle-dnf');
