@@ -1199,11 +1199,32 @@
       nextScramble();
     };
 
-    function checkSolvedAndFinish(now) {
-      if (state.timerState === 'RUNNING' && state.moves.length >= 3) {
-        finishSolve(now);
-        resetCube2D();
+    function isFaceletSequenceSolved(scrambleStr, movesList) {
+      let f = SOLVED_FACELETS;
+      const scrTokens = (scrambleStr || '').trim().split(/\s+/);
+      for (const tok of scrTokens) {
+        if (/^[URFDLB]/i.test(tok)) {
+          f = applyFaceletMove(f, tok);
+        }
       }
+      for (const item of movesList) {
+        const m = typeof item === 'string' ? item : item.m;
+        if (m && /^[URFDLB]/i.test(m)) {
+          f = applyFaceletMove(f, m);
+        }
+      }
+      return f === SOLVED_FACELETS;
+    }
+
+    function checkSolvedAndFinish(endTime) {
+      if (state.timerState !== 'RUNNING' || state.solveCompleting) return false;
+      if (state.lastFinishedSeq === state.solveSeq) return false;
+      if (computeMoveCount(state.moves) < 3) return false;
+      state.solveCompleting = true;
+      state.lastFinishedSeq = state.solveSeq;
+      finishSolve(endTime);
+      resetCube2D();
+      return true;
     }
 
     function loadSolves() {
@@ -1533,7 +1554,9 @@
           const sub = document.getElementById('timer-sub');
           if (sub) sub.textContent = `${count} moves | ${curTps} TPS`;
 
-          if (isSolved && count >= 3) {
+          if (count >= 3 && (isSolved || isFaceletSequenceSolved(state.scramble, state.moves))) {
+            state.liveFacelets = SOLVED_FACELETS;
+            scheduleNetRender();
             checkSolvedAndFinish(now);
             return;
           }
@@ -1724,10 +1747,10 @@
                 }
                 afterScrambleProgress();
               }
-              if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && state.liveFacelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
-                state.solveCompleting = true;
-                state.lastFinishedSeq = state.solveSeq;
-                checkSolvedAndFinish(state.lastMoveAt);
+              if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
+                state.liveFacelets = SOLVED_FACELETS;
+                scheduleNetRender();
+                checkSolvedAndFinish(state.lastMoveAt || now);
               }
             }
           } else if (ev.type === "BATTERY") {
