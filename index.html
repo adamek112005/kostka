@@ -478,7 +478,10 @@
         R: ([x, y, z]) => [x, z, -y],
         L: ([x, y, z]) => [x, -z, y],
         F: ([x, y, z]) => [y, -x, z],
-        B: ([x, y, z]) => [-y, x, z]
+        B: ([x, y, z]) => [-y, x, z],
+        M: ([x, y, z]) => [x, -z, y],
+        E: ([x, y, z]) => [z, y, -x],
+        S: ([x, y, z]) => [y, -x, z]
       };
       const inLayer = {
         U: ([x, y, z]) => y === 1,
@@ -486,11 +489,14 @@
         R: ([x, y, z]) => x === 1,
         L: ([x, y, z]) => x === -1,
         F: ([x, y, z]) => z === 1,
-        B: ([x, y, z]) => z === -1
+        B: ([x, y, z]) => z === -1,
+        M: ([x, y, z]) => x === 0,
+        E: ([x, y, z]) => y === 0,
+        S: ([x, y, z]) => z === 0
       };
 
       const perms = {};
-      for (const f of faces) {
+      for (const f of [...faces, 'M', 'E', 'S']) {
         const q1 = new Array(54);
         for (let i = 0; i < 54; i++) {
           const { p, n } = stickers[i];
@@ -513,7 +519,7 @@
 
     function applyFaceletMove(facelets, moveStr) {
       if (!moveStr || typeof moveStr !== 'string') return facelets;
-      const m = moveStr.trim().match(/^([URFDLB])(2|')?$/i);
+      const m = moveStr.trim().match(/^([URFDLBMES])(2|')?$/i);
       if (!m) return facelets;
       const f = m[1].toUpperCase();
       const q = m[2] === '2' ? 2 : (m[2] === "'" ? 3 : 1);
@@ -610,8 +616,9 @@
       let cubies = [];
       let animId = null;
       let initialized = false;
-      let activeTurn = null;
+      let activeGroup = null;
       const queue = [];
+      const MAX_QUEUE = 12;
 
       const COLORS = {
         U: 0xf8fafc,
@@ -676,13 +683,29 @@
         return group;
       }
 
+      function clearActiveGroup() {
+        if (!activeGroup) return;
+        for (const item of activeGroup.items) {
+          try {
+            if (item.pivot && rootGroup) rootGroup.remove(item.pivot);
+            for (const c of item.moving) {
+              if (item.pivot) item.pivot.remove(c);
+              if (rootGroup && !rootGroup.children.includes(c)) rootGroup.add(c);
+            }
+          } catch (e) {
+            dbg('3D cleanup err ' + e);
+          }
+        }
+        activeGroup = null;
+      }
+
       function rebuildCubies() {
         if (!rootGroup) return;
+        clearActiveGroup();
         while (rootGroup.children.length > 0) {
           rootGroup.remove(rootGroup.children[0]);
         }
         cubies = [];
-        activeTurn = null;
         queue.length = 0;
         for (let x = -1; x <= 1; x++) {
           for (let y = -1; y <= 1; y++) {
@@ -770,7 +793,7 @@
 
       function parseMoveSpec(moveStr) {
         if (!moveStr || typeof moveStr !== 'string') return null;
-        const m = moveStr.trim().match(/^([URFDLBXYZ])(2|')?$/i);
+        const m = moveStr.trim().match(/^([URFDLBMESXYZ])(2|')?$/i);
         if (!m) return null;
         const face = m[1].toUpperCase();
         const mod = m[2] || '';
@@ -786,6 +809,9 @@
           case 'L': axis = 'x'; layer = -1; dir = 1; break;
           case 'F': axis = 'z'; layer = 1; dir = -1; break;
           case 'B': axis = 'z'; layer = -1; dir = 1; break;
+          case 'M': axis = 'x'; layer = 0; dir = 1; break;
+          case 'E': axis = 'y'; layer = 0; dir = 1; break;
+          case 'S': axis = 'z'; layer = 0; dir = -1; break;
           case 'X': axis = 'x'; layer = null; dir = -1; break;
           case 'Y': axis = 'y'; layer = null; dir = -1; break;
           case 'Z': axis = 'z'; layer = null; dir = -1; break;
@@ -794,56 +820,104 @@
         return { axis, layer, angle: dir * turns * (Math.PI / 2) };
       }
 
-      function beginNextTurn() {
-        if (activeTurn || queue.length === 0) return;
-        const spec = queue.shift();
-        const pivot = new THREE.Group();
-        pivot.rotation.set(0, 0, 0);
-        rootGroup.add(pivot);
-
-        const moving = [];
-        for (const c of cubies) {
-          if (spec.layer === null) {
-            moving.push(c);
-          } else {
-            const coord = Math.round(c.position[spec.axis] / 1.0);
-            if (coord === spec.layer) moving.push(c);
-          }
+      function canCombineSpecs(existingSpecs, candidateSpec) {
+        if (!candidateSpec) return false;
+        if (candidateSpec.layer === null) return existingSpecs.length === 0;
+        for (const s of existingSpecs) {
+          if (s.layer === null) return false;
+          if (s.axis === candidateSpec.axis && s.layer === candidateSpec.layer) return false;
         }
-        for (const c of moving) {
-          rootGroup.remove(c);
-          pivot.add(c);
-        }
-        activeTurn = {
-          axis: spec.axis,
-          targetAngle: spec.angle,
-          currentAngle: 0,
-          pivot,
-          moving
-        };
+        return true;
       }
 
-      function finishActiveTurn() {
-        if (!activeTurn) return;
-        const { axis, targetAngle, pivot, moving } = activeTurn;
-        pivot.rotation[axis] = targetAngle;
-        pivot.updateMatrixWorld();
-        for (const c of moving) {
-          c.applyMatrix4(pivot.matrix);
-          c.position.set(
-            Math.round(c.position.x / 1.0) * 1.0,
-            Math.round(c.position.y / 1.0) * 1.0,
-            Math.round(c.position.z / 1.0) * 1.0
-          );
-          const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-          const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-          c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-          pivot.remove(c);
-          rootGroup.add(c);
+      function applySpecInstant(spec) {
+        const pivot = new THREE.Group();
+        pivot.rotation[spec.axis] = spec.angle;
+        pivot.updateMatrix();
+        for (const c of cubies) {
+          const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.0);
+          if (spec.layer === null || coord === spec.layer) {
+            c.applyMatrix4(pivot.matrix);
+            c.position.set(
+              Math.round(c.position.x / 1.0) * 1.0,
+              Math.round(c.position.y / 1.0) * 1.0,
+              Math.round(c.position.z / 1.0) * 1.0
+            );
+            const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
+            const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
+            c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+          }
         }
-        rootGroup.remove(pivot);
-        activeTurn = null;
-        beginNextTurn();
+      }
+
+      function syncInstantToCubeMoves() {
+        rebuildCubies();
+        for (const mv of state.cubeMoves) {
+          const spec = parseMoveSpec(mv);
+          if (spec) applySpecInstant(spec);
+        }
+      }
+
+      function beginNextGroup() {
+        if (activeGroup || queue.length === 0) return;
+        const specs = queue.shift();
+        if (!Array.isArray(specs) || specs.length === 0) return;
+        const items = [];
+        for (const spec of specs) {
+          const pivot = new THREE.Group();
+          pivot.rotation.set(0, 0, 0);
+          rootGroup.add(pivot);
+          const moving = [];
+          for (const c of cubies) {
+            if (spec.layer === null) {
+              moving.push(c);
+            } else {
+              const coord = Math.round(c.position[spec.axis] / 1.0);
+              if (coord === spec.layer) moving.push(c);
+            }
+          }
+          for (const c of moving) {
+            rootGroup.remove(c);
+            pivot.add(c);
+          }
+          items.push({
+            axis: spec.axis,
+            targetAngle: spec.angle,
+            currentAngle: 0,
+            pivot,
+            moving
+          });
+        }
+        activeGroup = {
+          label: specs.map(s => s.label || s.axis).join('+'),
+          items
+        };
+        dbg('3D anim start ' + activeGroup.label);
+      }
+
+      function finishActiveGroup() {
+        if (!activeGroup) return;
+        const finishedLabel = activeGroup.label;
+        for (const item of activeGroup.items) {
+          const { axis, targetAngle, pivot, moving } = item;
+          pivot.rotation[axis] = targetAngle;
+          pivot.updateMatrixWorld(true);
+          for (const c of moving) {
+            rootGroup.attach(c);
+            c.position.set(
+              Math.round(c.position.x / 1.0) * 1.0,
+              Math.round(c.position.y / 1.0) * 1.0,
+              Math.round(c.position.z / 1.0) * 1.0
+            );
+            const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
+            const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
+            c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
+            c.updateMatrix();
+          }
+          rootGroup.remove(pivot);
+        }
+        activeGroup = null;
+        dbg('3D anim done ' + finishedLabel);
       }
 
       let lastFrameTime = 0;
@@ -852,25 +926,50 @@
         lastFrameTime = performance.now();
         const tick = (now) => {
           animId = requestAnimationFrame(tick);
-          const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
-          lastFrameTime = now;
+          try {
+            const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
+            lastFrameTime = now;
 
-          if (!activeTurn && queue.length > 0) {
-            beginNextTurn();
-          }
-          if (activeTurn) {
-            const speed = 14 * (1 + queue.length);
-            const step = Math.sign(activeTurn.targetAngle) * speed * dt;
-            const nextAngle = activeTurn.currentAngle + step;
-            if (Math.abs(nextAngle) >= Math.abs(activeTurn.targetAngle)) {
-              finishActiveTurn();
-            } else {
-              activeTurn.currentAngle = nextAngle;
-              activeTurn.pivot.rotation[activeTurn.axis] = nextAngle;
+            if (!activeGroup && queue.length > 0) {
+              beginNextGroup();
             }
-          }
-          if (renderer && scene && camera && state.simMode === '3D') {
-            renderer.render(scene, camera);
+            if (activeGroup) {
+              const speed = 14 * (1 + queue.length);
+              let allDone = true;
+              for (const item of activeGroup.items) {
+                const step = Math.sign(item.targetAngle) * speed * dt;
+                const nextAngle = item.currentAngle + step;
+                if (Math.abs(nextAngle) >= Math.abs(item.targetAngle)) {
+                  item.currentAngle = item.targetAngle;
+                  item.pivot.rotation[item.axis] = item.targetAngle;
+                } else {
+                  item.currentAngle = nextAngle;
+                  item.pivot.rotation[item.axis] = nextAngle;
+                  allDone = false;
+                }
+              }
+              if (allDone) {
+                finishActiveGroup();
+                if (!activeGroup && queue.length > 0) {
+                  beginNextGroup();
+                }
+              }
+            }
+            if (renderer && scene && camera && state.simMode === '3D') {
+              renderer.render(scene, camera);
+            }
+          } catch (e) {
+            dbg('3D loop err ' + e + ' -> recover');
+            clearActiveGroup();
+            queue.length = 0;
+            try {
+              syncInstantToCubeMoves();
+              if (renderer && scene && camera && state.simMode === '3D') {
+                renderer.render(scene, camera);
+              }
+            } catch (recErr) {
+              dbg('3D recover err ' + recErr);
+            }
           }
         };
         animId = requestAnimationFrame(tick);
@@ -887,12 +986,33 @@
           const wrap = document.getElementById('three-wrap');
           if (wrap) wrap.style.display = 'none';
         },
-        addMove(moveStr) {
-          const spec = parseMoveSpec(moveStr);
-          if (!spec) return;
+        addMoveGroup(moveStrs) {
+          if (!Array.isArray(moveStrs) || moveStrs.length === 0) return;
           if (!initialized) init();
-          queue.push(spec);
-          if (!activeTurn) beginNextTurn();
+          const combined = [];
+          for (const mv of moveStrs) {
+            const spec = parseMoveSpec(mv);
+            if (!spec) continue;
+            spec.label = String(mv).trim();
+            if (canCombineSpecs(combined, spec)) {
+              combined.push(spec);
+            } else {
+              if (combined.length) queue.push(combined.splice(0));
+              combined.push(spec);
+            }
+          }
+          if (combined.length) queue.push(combined);
+          while (queue.length > MAX_QUEUE) {
+            const dropped = queue.shift();
+            if (Array.isArray(dropped)) {
+              for (const s of dropped) applySpecInstant(s);
+            }
+            dbg('3D queue cap flush');
+          }
+          if (!activeGroup) beginNextGroup();
+        },
+        addMove(moveStr) {
+          this.addMoveGroup([moveStr]);
         },
         reset() {
           if (!initialized) return;
@@ -904,23 +1024,7 @@
           for (const mv of movesList) {
             const spec = parseMoveSpec(mv);
             if (!spec) continue;
-            const pivot = new THREE.Group();
-            pivot.rotation[spec.axis] = spec.angle;
-            pivot.updateMatrix();
-            for (const c of cubies) {
-              const coord = spec.layer === null ? null : Math.round(c.position[spec.axis] / 1.0);
-              if (spec.layer === null || coord === spec.layer) {
-                c.applyMatrix4(pivot.matrix);
-                c.position.set(
-                  Math.round(c.position.x / 1.0) * 1.0,
-                  Math.round(c.position.y / 1.0) * 1.0,
-                  Math.round(c.position.z / 1.0) * 1.0
-                );
-                const euler = new THREE.Euler().setFromQuaternion(c.quaternion);
-                const snap = (v) => Math.round(v / (Math.PI / 2)) * (Math.PI / 2);
-                c.rotation.set(snap(euler.x), snap(euler.y), snap(euler.z));
-              }
-            }
+            applySpecInstant(spec);
           }
         }
       };
@@ -1052,7 +1156,7 @@
     })();
 
     function analyzeSteps(solve) {
-      const isFace = m => /^[URFDLB]/.test(m);
+      const isFace = m => /^[URFDLBMES]/i.test(m);
       let f = SOLVED_FACELETS;
       for (const t of (solve.scramble || '').trim().split(/\s+/)) if (isFace(t)) f = applyFaceletMove(f, t);
       const mv = (solve.moves || []).filter(x => isFace(x.m));
@@ -1203,13 +1307,13 @@
       let f = SOLVED_FACELETS;
       const scrTokens = (scrambleStr || '').trim().split(/\s+/);
       for (const tok of scrTokens) {
-        if (/^[URFDLB]/i.test(tok)) {
+        if (/^[URFDLBMES]/i.test(tok)) {
           f = applyFaceletMove(f, tok);
         }
       }
       for (const item of movesList) {
         const m = typeof item === 'string' ? item : item.m;
-        if (m && /^[URFDLB]/i.test(m)) {
+        if (m && /^[URFDLBMES]/i.test(m)) {
           f = applyFaceletMove(f, m);
         }
       }
@@ -1274,9 +1378,9 @@
 
     const AXIS_FACES = [['U', 'D'], ['R', 'L'], ['F', 'B']];
     function axisOfFace(f) {
-      if (f === 'U' || f === 'D') return 0;
-      if (f === 'R' || f === 'L') return 1;
-      if (f === 'F' || f === 'B') return 2;
+      if (f === 'U' || f === 'D' || f === 'E') return 0;
+      if (f === 'R' || f === 'L' || f === 'M') return 1;
+      if (f === 'F' || f === 'B' || f === 'S') return 2;
       return -1;
     }
     function makeGroup(axis) {
@@ -1503,12 +1607,82 @@
       state.rafId = requestAnimationFrame(updateTimerDisplay);
     }
 
-    function handleMove(move) {
+    let pendingSimulGroup = null;
+    let pendingSimulTimer = null;
+
+    function flushPendingSimulGroup() {
+      if (pendingSimulTimer) {
+        clearTimeout(pendingSimulTimer);
+        pendingSimulTimer = null;
+      }
+      if (!pendingSimulGroup || pendingSimulGroup.moves.length === 0) {
+        pendingSimulGroup = null;
+        return;
+      }
+      const batch = pendingSimulGroup.moves.slice();
+      pendingSimulGroup = null;
+      if (batch.length > 1) {
+        dbg('SIMUL group [' + batch.join(', ') + ']');
+      }
+      try {
+        if (state.simMode === '3D') {
+          threeCube.addMoveGroup(batch);
+        }
+      } catch (e) {
+        dbg('3D group err ' + e);
+        try {
+          threeCube.applyMovesInstant(state.cubeMoves);
+        } catch {}
+      }
+    }
+
+    function scheduleThreeMove(str, evSerial, now) {
+      if (state.simMode !== '3D') return;
+      const parseLayerInfo = (s) => {
+        const m = String(s).trim().match(/^([URFDLBMESXYZ])(2|')?$/i);
+        if (!m) return null;
+        const face = m[1].toUpperCase();
+        const axis = (face === 'U' || face === 'D' || face === 'E' || face === 'Y') ? 'y'
+          : ((face === 'R' || face === 'L' || face === 'M' || face === 'X') ? 'x' : 'z');
+        const layer = (face === 'U' || face === 'R' || face === 'F') ? 1
+          : ((face === 'D' || face === 'L' || face === 'B') ? -1
+          : ((face === 'M' || face === 'E' || face === 'S') ? 0 : null));
+        return { axis, layer };
+      };
+      const spec = parseLayerInfo(str);
+      if (!spec || spec.layer === null) {
+        flushPendingSimulGroup();
+        threeCube.addMoveGroup([str]);
+        return;
+      }
+      const serialNum = typeof evSerial === 'number' ? evSerial : null;
+      const canMerge = pendingSimulGroup
+        && (now - pendingSimulGroup.at) <= 25
+        && (serialNum === null || pendingSimulGroup.serial === null || Math.abs(serialNum - pendingSimulGroup.serial) <= 1)
+        && pendingSimulGroup.moves.every(prevStr => {
+          const p = parseLayerInfo(prevStr);
+          return p && p.layer !== null && !(p.axis === spec.axis && p.layer === spec.layer);
+        });
+      if (canMerge) {
+        pendingSimulGroup.moves.push(str);
+        pendingSimulGroup.at = now;
+        if (serialNum !== null) pendingSimulGroup.serial = serialNum;
+        clearTimeout(pendingSimulTimer);
+        pendingSimulTimer = setTimeout(flushPendingSimulGroup, 12);
+      } else {
+        flushPendingSimulGroup();
+        pendingSimulGroup = { moves: [str], at: now, serial: serialNum };
+        pendingSimulTimer = setTimeout(flushPendingSimulGroup, 12);
+      }
+    }
+
+    function handleMove(move, evMeta) {
       const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
       if (!str) return;
       state.cubeMoves.push(str);
 
-      const now = performance.now();
+      const rawTs = typeof evMeta?.timestamp === 'number' && Number.isFinite(evMeta.timestamp) ? evMeta.timestamp : null;
+      const now = rawTs !== null ? rawTs : performance.now();
       state.lastMoveAt = now;
 
       let isSolved = false;
@@ -1519,11 +1693,9 @@
       }
 
       try {
-        if (state.simMode === '3D') {
-          threeCube.addMove(str);
-        }
+        scheduleThreeMove(str, evMeta?.serial, now);
       } catch (e) {
-        console.error(e);
+        dbg('3D schedule err ' + e);
       }
 
       try {
@@ -1538,6 +1710,7 @@
           state.timerState = 'RUNNING';
           state.startTime = now;
           state.moves = [{ m: str, t: 0 }];
+          dbg('TIMER start ' + str + ' seq=' + state.solveSeq);
           const val = document.getElementById('timer-val');
           if (val) {
             val.className = 'timer running';
@@ -1714,8 +1887,9 @@
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
-            dbg("MOVE " + ev.move + " serial " + ev.serial);
-            handleMove(ev.move);
+            const mvStr = typeof ev.move === 'string' ? ev.move : (ev.move?.move || ev.move?.latestAlgLeaf?.toString() || '');
+            dbg("MOVE " + mvStr + " serial " + ev.serial);
+            handleMove(ev.move, ev);
             clearTimeout(state.faceletsDebounce);
             state.faceletsDebounce = setTimeout(() => {
               if (state.conn && !state.faceletsPending) {
