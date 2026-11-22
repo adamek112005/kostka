@@ -405,13 +405,16 @@
       faceletsPending: false,
       faceletsPendingTimer: null,
       faceletsReqAt: 0,
-      faceletsReqs: [],
-      lastFaceletsReqAt: -Infinity,
       resetSeq: 0,
       lastResetAt: 0,
       syncMismatch: false,
+      mismatchCount: 0,
+      mismatchSerial: null,
+      mismatchFirstAt: 0,
       postResetCheck: false,
       lastMoveSerial: null,
+      serialMod: 256,
+      appliedSerials: [],
       cmdChain: Promise.resolve(),
       dbg: [],
       dbgLastAt: 0,
@@ -634,22 +637,69 @@
       return next.join('');
     }
 
-    function cubeCmd(cmd) {
-      if (cmd?.type === 'REQUEST_FACELETS') {
-        const reqAt = performance.now();
-        state.faceletsReqAt = reqAt;
-        state.faceletsReqs.push({ at: reqAt, resetSeq: state.resetSeq });
-        if (state.faceletsReqs.length > 12) state.faceletsReqs.shift();
+    const QUARTER_TURNS = ['U', "U'", 'R', "R'", 'F', "F'", 'D', "D'", 'L', "L'", 'B', "B'"];
+    const INV_TURN = {
+      U: "U'", "U'": 'U',
+      R: "R'", "R'": 'R',
+      F: "F'", "F'": 'F',
+      D: "D'", "D'": 'D',
+      L: "L'", "L'": 'L',
+      B: "B'", "B'": 'B'
+    };
+
+    function inferMissingMoves(startFacelets, targetFacelets, count) {
+      if (count < 1 || count > 4) return null;
+      const path = new Array(count);
+      function dfs(depth, cur, prev1, prev2) {
+        if (depth === count) {
+          return cur === targetFacelets ? path.slice() : null;
+        }
+        for (let i = 0; i < 12; i++) {
+          const mv = QUARTER_TURNS[i];
+          if (prev1 && INV_TURN[mv] === prev1) continue;
+          if (prev1 && prev2 && mv === prev1 && mv === prev2) continue;
+          path[depth] = mv;
+          const res = dfs(depth + 1, applyFaceletMove(cur, mv), mv, prev1);
+          if (res) return res;
+        }
+        return null;
       }
-      const run = () => (state.conn ? Promise.race([
-        state.conn.sendCubeCommand(cmd),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
-      ]) : null);
-      state.cmdChain = state.cmdChain.then(run).catch(e => dbg('cmd error ' + e));
-      return state.cmdChain;
+      return dfs(0, startFacelets, null, null);
     }
 
-    function requestFaceletsNow() {
+    function hasAppliedSerial(serial) {
+      return serial !== null && state.appliedSerials.includes(serial);
+    }
+
+    function recordAppliedSerial(serial) {
+      if (serial === null) return;
+      const idx = state.appliedSerials.indexOf(serial);
+      if (idx !== -1) state.appliedSerials.splice(idx, 1);
+      state.appliedSerials.push(serial);
+      if (state.appliedSerials.length > 32) state.appliedSerials.shift();
+    }
+
+    function cubeCmd(cmd) {
+      const run = async () => {
+        if (!state.conn) return 'disconnected';
+        try {
+          await Promise.race([
+            state.conn.sendCubeCommand(cmd),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
+          ]);
+          return 'sent';
+        } catch (e) {
+          const res = e?.message === 'timeout' ? 'timed out' : 'failed';
+          dbg(`cmd ${cmd?.type || ''} ${res}: ${e?.message || e}`);
+          return res;
+        }
+      };
+      const p = state.cmdChain.then(run);
+      state.cmdChain = p.catch(() => {});
+      return p;
+    }
+
+    function requestFaceletsNow(reason) {
       if (!state.conn) return;
       clearTimeout(state.faceletsDebounce);
       state.faceletsDebounce = null;
@@ -657,30 +707,24 @@
       clearTimeout(state.faceletsPendingTimer);
       state.faceletsPendingTimer = setTimeout(() => {
         state.faceletsPending = false;
-      }, 1500);
-      state.lastFaceletsReqAt = performance.now();
+      }, 1000);
+      state.faceletsReqAt = performance.now();
+      dbg(`REQ FACELETS reason=${reason}`);
       cubeCmd({ type: "REQUEST_FACELETS" });
     }
 
     function scheduleFaceletsAfterMove() {
       if (!state.conn) return;
       clearTimeout(state.faceletsDebounce);
-      const now = performance.now();
-      const delay = Math.max(700, 2000 - (now - state.lastFaceletsReqAt));
       state.faceletsDebounce = setTimeout(() => {
         state.faceletsDebounce = null;
         if (!state.conn) return;
-        const t = performance.now();
-        if (t - state.lastMoveAt < 700 || t - state.lastFaceletsReqAt < 2000) {
+        if (state.faceletsPending) {
           scheduleFaceletsAfterMove();
           return;
         }
-        if (state.faceletsPending) {
-          state.faceletsDebounce = setTimeout(scheduleFaceletsAfterMove, 200);
-          return;
-        }
-        requestFaceletsNow();
-      }, delay);
+        requestFaceletsNow('move');
+      }, 100);
     }
 
     let netRenderScheduled = false;
@@ -1793,7 +1837,7 @@
       scheduleNetRender();
       renderScramble();
       if (state.conn) {
-        requestFaceletsNow();
+        requestFaceletsNow('scramble');
       }
     }
 
@@ -1808,39 +1852,29 @@
       state.rafId = requestAnimationFrame(updateTimerDisplay);
     }
 
-    function handleMove(move) {
-      const isObj = move && typeof move === 'object';
-      const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
+    function applyMove(str, { serial = null, moveTs = performance.now(), rawCubeTs = null, localTs = null, isInferred = false } = {}) {
       if (!str) return;
-      const serial = (isObj && typeof move.serial === 'number') ? move.serial : null;
-      const cubeTs = isObj
-        ? (typeof move.cubeTimestamp === 'number' && Number.isFinite(move.cubeTimestamp)
-            ? move.cubeTimestamp
-            : (typeof move.timestamp === 'number' && Number.isFinite(move.timestamp) ? move.timestamp : null))
-        : null;
-      const localTs = (isObj && typeof move.localTimestamp === 'number' && Number.isFinite(move.localTimestamp))
-        ? move.localTimestamp
-        : null;
+      if (serial !== null) {
+        if (hasAppliedSerial(serial)) {
+          dbg(`recovered duplicate ignored serial ${serial}`);
+          return;
+        }
+        recordAppliedSerial(serial);
+        state.lastMoveSerial = serial;
+      }
 
       state.cubeMoves.push(str);
 
-      const now = performance.now();
-      const moveGapMs = state.lastMoveAt > 0 ? (now - state.lastMoveAt) : Infinity;
-      state.lastMoveAt = now;
+      const moveGapMs = state.lastMoveAt > 0 ? (moveTs - state.lastMoveAt) : Infinity;
+      state.lastMoveAt = moveTs;
       state.lastMoveGapMs = moveGapMs;
       if (moveGapMs <= 60) state.hadRapidMovesSinceLastSync = true;
       state.postResetCheck = false;
+      state.mismatchCount = 0;
+      state.mismatchSerial = null;
+      state.mismatchFirstAt = 0;
 
-      dbg(`MOVE ${str} ser=${serial} cts=${cubeTs} lts=${localTs}`);
-      if (isObj && localTs === null) {
-        dbg(`RECOVERED MOVE ${str} ser=${serial}`);
-      }
-      if (serial !== null) {
-        if (state.lastMoveSerial !== null && serial !== ((state.lastMoveSerial + 1) % 256)) {
-          dbg(`SERIAL GAP prev=${state.lastMoveSerial} cur=${serial}`);
-        }
-        state.lastMoveSerial = serial;
-      }
+      const effectiveCubeTs = (!isInferred && localTs !== null) ? rawCubeTs : null;
 
       let isSolved = false;
       if (!/^[xyz]/i.test(str)) {
@@ -1867,9 +1901,9 @@
 
         if (state.timerState === 'ARMED') {
           state.timerState = 'RUNNING';
-          state.startTime = now;
+          state.startTime = moveTs;
           state.lastDisplayedTimer = '0.00';
-          state.moves = [{ m: str, t: 0, ct: cubeTs }];
+          state.moves = [{ m: str, t: 0, ct: effectiveCubeTs }];
           const val = document.getElementById('timer-val');
           if (val) {
             val.className = 'timer running';
@@ -1880,16 +1914,53 @@
           state.rafId = requestAnimationFrame(updateTimerDisplay);
         } else if (state.timerState === 'RUNNING') {
           startDnfTimer();
-          state.moves.push({ m: str, t: Math.round(now - state.startTime), ct: cubeTs });
+          state.moves.push({ m: str, t: Math.max(0, Math.round(moveTs - state.startTime)), ct: effectiveCubeTs });
           const count = computeMoveCount(state.moves);
           if (count >= 3 && isSolved) {
-            checkSolvedAndFinish(now);
+            checkSolvedAndFinish(moveTs);
             return;
           }
         }
       } catch (e) {
         console.error(e);
       }
+    }
+
+    function handleMove(move) {
+      const isObj = move && typeof move === 'object';
+      const str = typeof move === 'string' ? move : (move?.move || move?.latestAlgLeaf?.toString());
+      if (!str) return;
+      const serial = (isObj && typeof move.serial === 'number') ? move.serial : null;
+      if (serial !== null && serial > 255) state.serialMod = 65536;
+
+      if (serial !== null && hasAppliedSerial(serial)) {
+        dbg(`recovered duplicate ignored serial ${serial}`);
+        return;
+      }
+
+      const rawCubeTs = isObj
+        ? (typeof move.cubeTimestamp === 'number' && Number.isFinite(move.cubeTimestamp)
+            ? move.cubeTimestamp
+            : (typeof move.timestamp === 'number' && Number.isFinite(move.timestamp) ? move.timestamp : null))
+        : null;
+      const localTs = (isObj && typeof move.localTimestamp === 'number' && Number.isFinite(move.localTimestamp))
+        ? move.localTimestamp
+        : null;
+
+      dbg(`MOVE ${str} ser=${serial} cts=${rawCubeTs} lts=${localTs}`);
+      if (isObj && localTs === null) {
+        dbg(`RECOVERED MOVE ${str} ser=${serial}`);
+      }
+      if (serial !== null && state.lastMoveSerial !== null) {
+        const mod = state.serialMod;
+        if (serial !== ((state.lastMoveSerial + 1) % mod)) {
+          dbg(`SERIAL GAP prev=${state.lastMoveSerial} cur=${serial}`);
+        }
+      }
+
+      const now = performance.now();
+      applyMove(str, { serial, moveTs: now, rawCubeTs, localTs, isInferred: false });
+      scheduleFaceletsAfterMove();
     }
 
     function resolveSolveMoves(rawMoves, arrivalTotalMs) {
@@ -2015,7 +2086,7 @@
       }
     };
 
-    window.reset = async () => {
+    window.reset = () => {
       clearTimeout(state.faceletsDebounce);
       state.faceletsDebounce = null;
       clearTimeout(state.faceletsPendingTimer);
@@ -2023,6 +2094,11 @@
       state.faceletsPending = false;
       state.resetSeq++;
       state.lastResetAt = performance.now();
+      state.appliedSerials = [];
+      state.lastMoveSerial = null;
+      state.mismatchCount = 0;
+      state.mismatchSerial = null;
+      state.mismatchFirstAt = 0;
       state.syncMismatch = false;
       state.postResetCheck = false;
       state.hadRapidMovesSinceLastSync = false;
@@ -2038,15 +2114,13 @@
 
       if (state.conn) {
         const myResetSeq = state.resetSeq;
-        try {
-          await cubeCmd({ type: "REQUEST_RESET" });
-        } catch (e) {
-          dbg('REQUEST_RESET err: ' + (e?.message || e));
-        }
-        if (state.conn && state.resetSeq === myResetSeq) {
-          state.postResetCheck = true;
-          requestFaceletsNow();
-        }
+        cubeCmd({ type: "REQUEST_RESET" }).then(res => {
+          dbg(`REQUEST_RESET ${res}`);
+          if (state.conn && state.resetSeq === myResetSeq) {
+            state.postResetCheck = true;
+            requestFaceletsNow('reset');
+          }
+        });
       }
     };
 
@@ -2142,61 +2216,183 @@
         });
         state.conn = conn;
         state.connecting = false;
+        state.appliedSerials = [];
+        state.lastMoveSerial = null;
+        state.mismatchCount = 0;
+        state.mismatchSerial = null;
+        state.mismatchFirstAt = 0;
+        state.syncMismatch = false;
+        state.postResetCheck = false;
+        hideNotice();
         renderStatusBadge('connected');
 
         state.sub = conn.events$.subscribe(ev => {
           if (ev.type === "MOVE") {
             handleMove(ev);
-            scheduleFaceletsAfterMove();
           } else if (ev.type === "FACELETS") {
-            const req = state.faceletsReqs.shift() || { at: state.faceletsReqAt, resetSeq: state.resetSeq };
-            if (state.faceletsReqs.length === 0) {
-              state.faceletsPending = false;
-              clearTimeout(state.faceletsPendingTimer);
-            }
+            state.faceletsPending = false;
+            clearTimeout(state.faceletsPendingTimer);
             if (typeof ev.facelets === 'string' && ev.facelets.length === 54) {
               const now = performance.now();
-              const preReset = req.resetSeq !== state.resetSeq || req.at < state.lastResetAt;
-              const moveAfterReq = state.lastMoveAt > req.at;
+              if (now - state.lastResetAt < 300) {
+                dbg(`FACELETS ignored (${Math.round(now - state.lastResetAt)}ms after reset)`);
+                return;
+              }
+
               const evSerial = typeof ev.serial === 'number' ? ev.serial : null;
-              const serialMismatch = evSerial !== null && state.lastMoveSerial !== null && evSerial !== state.lastMoveSerial;
-              const quietOk = (now - state.lastMoveAt) >= 150;
+              if (evSerial !== null && evSerial > 255) state.serialMod = 65536;
 
-              if (preReset || moveAfterReq || serialMismatch || !quietOk) {
-                dbg(`FACELETS stale ignored (preReset=${preReset} afterReq=${moveAfterReq} ser=${evSerial}/${state.lastMoveSerial} quiet=${Math.round(now - state.lastMoveAt)}ms)`);
-                return;
-              }
-
-              if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
-                state.liveFacelets = SOLVED_FACELETS;
-                scheduleNetRender();
-                checkSolvedAndFinish(state.lastMoveAt || now);
-                return;
-              }
-
-              if (ev.facelets === state.liveFacelets) {
-                dbg("FACELETS match");
-                state.postResetCheck = false;
-                state.hadRapidMovesSinceLastSync = false;
-                if (state.syncMismatch) {
-                  state.syncMismatch = false;
-                  hideNotice();
-                }
-              } else {
-                let diffCount = 0;
-                for (let i = 0; i < 54; i++) {
-                  if (ev.facelets[i] !== state.liveFacelets[i]) diffCount++;
-                }
+              const confirmMismatch = (diffCount, reasonLabel) => {
                 const rapid = state.hadRapidMovesSinceLastSync;
-                dbg(`FACELETS mismatch diff=${diffCount}/54 rapid<=60ms=${rapid} (lastGap=${Number.isFinite(state.lastMoveGapMs) ? Math.round(state.lastMoveGapMs) + 'ms' : 'n/a'})`);
+                if (state.mismatchCount === 0 || evSerial !== state.mismatchSerial) {
+                  state.mismatchCount = 1;
+                  state.mismatchSerial = evSerial;
+                  state.mismatchFirstAt = now;
+                  dbg(`${reasonLabel} diff=${diffCount}/54 confirm=1/2 rapid<=60ms=${rapid} ser=${evSerial}`);
+                  return;
+                }
+                const elapsed = now - state.mismatchFirstAt;
+                if (elapsed < 300) {
+                  dbg(`${reasonLabel} diff=${diffCount}/54 confirm=1/2 dt=${Math.round(elapsed)}ms<300ms ser=${evSerial}`);
+                  return;
+                }
+                state.mismatchCount = 2;
                 state.syncMismatch = true;
+                dbg(`${reasonLabel} diff=${diffCount}/54 confirm=2/2 rapid<=60ms=${rapid} ser=${evSerial}`);
                 if (state.postResetCheck) {
-                  state.postResetCheck = false;
                   showNotice("Cube still reports a different state; the app uses move tracking only.", false, true);
                 } else {
                   showNotice("Cube and app disagree. Solve the cube and press Reset.", false, true);
                 }
+              };
+
+              const countDiffStickers = (a, b) => {
+                let d = 0;
+                for (let i = 0; i < 54; i++) if (a[i] !== b[i]) d++;
+                return d;
+              };
+
+              if (evSerial === null) {
+                if (now - state.lastMoveAt < 150) {
+                  dbg(`FACELETS stale ignored (no serial, quiet=${Math.round(now - state.lastMoveAt)}ms)`);
+                  return;
+                }
+                if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
+                  state.liveFacelets = SOLVED_FACELETS;
+                  scheduleNetRender();
+                  checkSolvedAndFinish(state.lastMoveAt || now);
+                  return;
+                }
+                if (ev.facelets === state.liveFacelets) {
+                  dbg("FACELETS match");
+                  state.mismatchCount = 0;
+                  state.mismatchSerial = null;
+                  state.mismatchFirstAt = 0;
+                  state.postResetCheck = false;
+                  state.hadRapidMovesSinceLastSync = false;
+                  if (state.syncMismatch) {
+                    state.syncMismatch = false;
+                    hideNotice();
+                  }
+                } else {
+                  confirmMismatch(countDiffStickers(ev.facelets, state.liveFacelets), "FACELETS mismatch");
+                }
+                return;
               }
+
+              if (state.lastMoveSerial === null) {
+                if (ev.facelets === state.liveFacelets) {
+                  dbg(`FACELETS match ser=${evSerial}`);
+                  state.lastMoveSerial = evSerial;
+                  recordAppliedSerial(evSerial);
+                  state.mismatchCount = 0;
+                  state.mismatchSerial = null;
+                  state.mismatchFirstAt = 0;
+                  state.postResetCheck = false;
+                  state.hadRapidMovesSinceLastSync = false;
+                  if (state.syncMismatch) {
+                    state.syncMismatch = false;
+                    hideNotice();
+                  }
+                } else {
+                  confirmMismatch(countDiffStickers(ev.facelets, state.liveFacelets), "FACELETS mismatch");
+                }
+                return;
+              }
+
+              const mod = state.serialMod;
+              const diff = (evSerial - state.lastMoveSerial + mod) % mod;
+
+              if (diff > mod / 2) {
+                dbg(`FACELETS stale ignored cube=${evSerial} app=${state.lastMoveSerial}`);
+                return;
+              }
+
+              if (diff === 0) {
+                if (state.timerState === 'RUNNING' && !state.solveCompleting && state.lastFinishedSeq !== state.solveSeq && ev.facelets === SOLVED_FACELETS && computeMoveCount(state.moves) >= 3) {
+                  state.liveFacelets = SOLVED_FACELETS;
+                  scheduleNetRender();
+                  checkSolvedAndFinish(state.lastMoveAt || now);
+                  return;
+                }
+                if (ev.facelets === state.liveFacelets) {
+                  dbg("FACELETS match");
+                  state.mismatchCount = 0;
+                  state.mismatchSerial = null;
+                  state.mismatchFirstAt = 0;
+                  state.postResetCheck = false;
+                  state.hadRapidMovesSinceLastSync = false;
+                  if (state.syncMismatch) {
+                    state.syncMismatch = false;
+                    hideNotice();
+                  }
+                } else {
+                  confirmMismatch(countDiffStickers(ev.facelets, state.liveFacelets), "FACELETS mismatch");
+                }
+                return;
+              }
+
+              if (diff >= 1 && diff <= 4) {
+                if (ev.facelets === state.liveFacelets) {
+                  dbg(`FACELETS match ahead cube=${evSerial} app=${state.lastMoveSerial}`);
+                  state.lastMoveSerial = evSerial;
+                  recordAppliedSerial(evSerial);
+                  state.mismatchCount = 0;
+                  state.mismatchSerial = null;
+                  state.mismatchFirstAt = 0;
+                  state.postResetCheck = false;
+                  state.hadRapidMovesSinceLastSync = false;
+                  if (state.syncMismatch) {
+                    state.syncMismatch = false;
+                    hideNotice();
+                  }
+                  return;
+                }
+                dbg(`GAP cube serial ${evSerial} app serial ${state.lastMoveSerial} missing ${diff}`);
+                const inferred = inferMissingMoves(state.liveFacelets, ev.facelets, diff);
+                if (inferred) {
+                  const baseSerial = state.lastMoveSerial;
+                  const inferTs = Math.max(state.faceletsReqAt > 0 ? state.faceletsReqAt : now, state.lastMoveAt || 0);
+                  for (let idx = 0; idx < inferred.length; idx++) {
+                    const mv = inferred[idx];
+                    const ser = (baseSerial + idx + 1) % mod;
+                    const dtSincePrev = state.lastMoveAt > 0 ? Math.round(inferTs - state.lastMoveAt) : 0;
+                    dbg(`INFERRED move ${mv} for serial ${ser} after ${dtSincePrev} ms since the previous move`);
+                    applyMove(mv, { serial: ser, moveTs: inferTs, rawCubeTs: null, localTs: null, isInferred: true });
+                  }
+                  state.postResetCheck = false;
+                  state.hadRapidMovesSinceLastSync = false;
+                  if (state.syncMismatch) {
+                    state.syncMismatch = false;
+                    hideNotice();
+                  }
+                } else {
+                  confirmMismatch(countDiffStickers(ev.facelets, state.liveFacelets), "no match for gap");
+                }
+                return;
+              }
+
+              confirmMismatch(countDiffStickers(ev.facelets, state.liveFacelets), "FACELETS mismatch");
             }
           } else if (ev.type === "BATTERY") {
             const bat = document.getElementById('battery-pill');
@@ -2206,8 +2402,11 @@
             clearTimeout(state.faceletsDebounce);
             clearTimeout(state.faceletsPendingTimer);
             state.faceletsPending = false;
-            state.faceletsReqs = [];
+            state.appliedSerials = [];
             state.lastMoveSerial = null;
+            state.mismatchCount = 0;
+            state.mismatchSerial = null;
+            state.mismatchFirstAt = 0;
             state.postResetCheck = false;
             clearBattery();
             if (state.sub) {
@@ -2219,7 +2418,7 @@
           }
         });
 
-        requestFaceletsNow();
+        requestFaceletsNow('connect');
         await cubeCmd({ type: "REQUEST_BATTERY" });
         state.batteryTimer = setInterval(async () => {
           try {
