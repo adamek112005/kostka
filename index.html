@@ -157,6 +157,22 @@
     <div id="alg-detail-body" style="display:flex;flex-direction:column;gap:12px;"></div>
   </dialog>
 
+  <dialog id="debug-dialog">
+    <div class="dialog-inner">
+      <div class="dialog-head">
+        <h2 style="font-size:1.1rem;font-weight:700;">Debug console</h2>
+        <button onclick="closeDebugDialog()" style="padding:6px 12px;font-size:1.1rem;line-height:1;">✕</button>
+      </div>
+      <div id="dbg-status" style="font-family:ui-monospace,monospace;font-size:0.72rem;color:var(--sub);background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 10px;word-break:break-word;"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="btn-dbg-copy" onclick="copyDebugLog()" style="padding:6px 12px;font-size:0.82rem;">Copy</button>
+        <button onclick="clearDebugLog()" style="padding:6px 12px;font-size:0.82rem;">Clear</button>
+        <button id="btn-dbg-filter" onclick="toggleDebugFilter()" style="padding:6px 12px;font-size:0.82rem;">Sync only</button>
+      </div>
+      <pre id="dbg-output" style="flex:1;min-height:200px;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;font-family:ui-monospace,monospace;font-size:0.72rem;line-height:1.35;white-space:pre-wrap;word-break:break-word;"></pre>
+    </div>
+  </dialog>
+
   <script src="app.js"></script>
 </body>
 </html>
